@@ -62,7 +62,7 @@ command -v sha256sum >/dev/null 2>&1 || opkg install coreutils-sha256sum \
     || early_die "sha256sum is required"
 
 mkdir -p /opt/lib/olcrtc-keenetic/lib /opt/etc/init.d
-for file in upgrade.sh uninstall.sh doctor.sh import-uri.sh run-client.sh; do
+for file in upgrade.sh rollback.sh migration.sh uninstall.sh doctor.sh import-uri.sh run-client.sh; do
     [ -f "$script_dir/$file" ] || early_die "release bundle is incomplete: $file"
     cp "$script_dir/$file" "/opt/lib/olcrtc-keenetic/$file.tmp"
     chmod 755 "/opt/lib/olcrtc-keenetic/$file.tmp"
@@ -74,10 +74,10 @@ for file in common.sh manifest.py uri_import.py; do
     chmod 755 "/opt/lib/olcrtc-keenetic/lib/$file.tmp"
     mv "/opt/lib/olcrtc-keenetic/lib/$file.tmp" "/opt/lib/olcrtc-keenetic/lib/$file"
 done
-[ -f "$script_dir/S98olcrtc-client" ] || early_die "release bundle is missing the client service"
-cp "$script_dir/S98olcrtc-client" /opt/etc/init.d/S98olcrtc-client.tmp
-chmod 755 /opt/etc/init.d/S98olcrtc-client.tmp
-mv /opt/etc/init.d/S98olcrtc-client.tmp /opt/etc/init.d/S98olcrtc-client
+[ -f "$script_dir/S96olcrtc-native" ] || early_die "release bundle is missing the isolated client service"
+cp "$script_dir/S96olcrtc-native" /opt/etc/init.d/S96olcrtc-native.tmp
+chmod 755 /opt/etc/init.d/S96olcrtc-native.tmp
+mv /opt/etc/init.d/S96olcrtc-native.tmp /opt/etc/init.d/S96olcrtc-native
 [ -f "$script_dir/S97olcrtc-web" ] || early_die "release bundle is missing the web service"
 cp "$script_dir/S97olcrtc-web" /opt/etc/init.d/S97olcrtc-web.tmp
 chmod 755 /opt/etc/init.d/S97olcrtc-web.tmp
@@ -92,11 +92,34 @@ mv /opt/lib/olcrtc-keenetic/web-app.py.tmp /opt/lib/olcrtc-keenetic/web-app.py
 . /opt/lib/olcrtc-keenetic/lib/common.sh
 olc_make_directories
 
+if [ -s "$OLCRTC_WEB_CONFIG" ]; then
+    python3 - "$OLCRTC_WEB_CONFIG" <<'PY' || olc_die "existing web configuration migration failed"
+# ai-generated: update only the known v0.1.1 service path without touching credentials.
+import json
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+legacy = "/opt/etc/init.d/S98olcrtc-client"
+native = "/opt/etc/init.d/S96olcrtc-native"
+if payload.get("client_service", legacy) == legacy:
+    payload["client_service"] = native
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        os.chmod(temporary, 0o600)
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    os.replace(temporary, path)
+PY
+fi
+
 if [ ! -s "$OLCRTC_CONFIG" ]; then
     if [ -n "$uri_file" ]; then
         "$OLCRTC_LIB/import-uri.sh" --uri-file "$uri_file"
     else
-        "$OLCRTC_LIB/import-uri.sh"
+        olc_log "client is not configured; open the web UI and import a Spec URI"
     fi
 else
     olc_log "existing configuration was preserved"
@@ -141,7 +164,7 @@ olc_secure_permissions
 set --
 [ -z "$manifest_file" ] || set -- "$@" --manifest-file "$manifest_file"
 [ -z "$manifest_url" ] || set -- "$@" --manifest-url "$manifest_url"
-[ "$no_start" = no ] || set -- "$@" --no-start
+[ "$no_start" = no ] && [ -f "$OLCRTC_ENABLED" ] || set -- "$@" --no-start
 [ "$#" -gt 0 ] || olc_die "installer requires --manifest-file or --manifest-url"
 "$OLCRTC_LIB/upgrade.sh" "$@"
 
@@ -153,6 +176,7 @@ olc_log "installation complete; TUN and router routes were not changed"
 olc_log "status: $OLCRTC_INIT status"
 olc_log "diagnostics: $OLCRTC_LIB/doctor.sh"
 olc_log "updates: $OLCRTC_LIB/upgrade.sh"
+olc_log "migration: $OLCRTC_LIB/migration.sh status"
 olc_log "web UI: http://$web_bind:8091/ (LAN only; WAN binding is unsupported)"
 if [ -n "$web_password" ]; then
     olc_log "web login: admin"

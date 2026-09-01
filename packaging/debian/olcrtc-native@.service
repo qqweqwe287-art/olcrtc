@@ -1,6 +1,5 @@
-# ai-generated: hardened systemd template for olcRTC server instances.
 [Unit]
-Description=olcRTC server instance %i
+Description=olcRTC native server instance %i
 Documentation=https://github.com/qqweqwe287-art/olcrtc
 Wants=network-online.target
 After=network-online.target
@@ -9,14 +8,14 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-User=olcrtc
-Group=olcrtc
+User=olcrtc-native
+Group=olcrtc-native
 UMask=0027
-WorkingDirectory=/var/lib/olcrtc/%i
-StateDirectory=olcrtc/%i
+WorkingDirectory=/var/lib/olcrtc-native/%i
+StateDirectory=olcrtc-native/%i
 StateDirectoryMode=0750
-Environment=HOME=/var/lib/olcrtc/%i
-ExecStart=/usr/local/lib/olcrtc/current/olcrtc /etc/olcrtc/%i.yaml
+Environment=HOME=/var/lib/olcrtc-native/%i
+ExecStart=/usr/local/lib/olcrtc-native/current/olcrtc /etc/olcrtc-native/%i.yaml
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=15s

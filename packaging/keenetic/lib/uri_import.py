@@ -36,6 +36,7 @@ PARAMETERS = {
         "video-tile-rs",
     },
 }
+PROFILE_KEYS = {"schema", "provider", "transport", "room", "parameters"}
 
 
 # ai-generated: parsed canonical URI fields.
@@ -279,19 +280,114 @@ def write_config(config_path: Path, connection: Connection) -> None:
                 pass
 
 
+# ai-generated: return the complete non-secret managed profile representation.
+def profile_payload(connection: Connection) -> dict[str, object]:
+    return {
+        "schema": 1,
+        "provider": connection.provider,
+        "transport": connection.transport,
+        "room": connection.room,
+        "parameters": dict(connection.parameters),
+    }
+
+
+# ai-generated: atomically write a root-owned non-secret profile for the web UI.
+def write_profile(profile_path: Path, connection: Connection) -> None:
+    profile_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    profile_temp = profile_path.with_name(f".{profile_path.name}.{os.getpid()}.tmp")
+    try:
+        with profile_temp.open("x", encoding="utf-8") as handle:
+            os.chmod(profile_temp, stat.S_IRUSR | stat.S_IWUSR)
+            json.dump(profile_payload(connection), handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(profile_temp, profile_path)
+    except Exception:
+        profile_temp.unlink(missing_ok=True)
+        raise
+
+
+# ai-generated: validate a settings object supplied by the authenticated web UI.
+def connection_from_settings(payload: object, key: str) -> Connection:
+    if not isinstance(payload, dict) or set(payload) != PROFILE_KEYS - {"schema"}:
+        raise ValueError("settings must contain provider, transport, room and parameters")
+    provider = payload.get("provider")
+    transport = payload.get("transport")
+    room = payload.get("room")
+    parameters = payload.get("parameters")
+    if not all(isinstance(item, str) for item in (provider, transport, room)):
+        raise ValueError("provider, transport and room must be strings")
+    if provider not in PROVIDERS or transport not in TRANSPORTS:
+        raise ValueError("provider or transport is unsupported")
+    if not isinstance(parameters, dict) or not all(
+        isinstance(name, str) and isinstance(value, str) for name, value in parameters.items()
+    ):
+        raise ValueError("parameters must be an object of strings")
+    if len(room) > 4096 or any(ord(character) < 32 for character in room):
+        raise ValueError("room contains invalid characters")
+    validate_room(provider, room)
+    validate_compatibility(provider, transport)
+    unknown = set(parameters) - PARAMETERS[transport]
+    if unknown:
+        raise ValueError(f"unsupported {transport} parameter: {sorted(unknown)[0]}")
+    validate_parameters(transport, parameters)
+    if not HEX_KEY.fullmatch(key):
+        raise ValueError("stored encryption key is invalid")
+    return Connection(provider, transport, room, key.lower(), dict(parameters))
+
+
+# ai-generated: read the single managed key without returning it to the web process.
+def read_current_key(config_path: Path) -> str:
+    key_files = list(config_path.parent.glob("secret-*.key"))
+    if len(key_files) != 1:
+        raise ValueError("managed configuration must contain exactly one secret key file")
+    key = key_files[0].read_text(encoding="ascii").strip()
+    if not HEX_KEY.fullmatch(key):
+        raise ValueError("stored encryption key is invalid")
+    return key
+
+
+# ai-generated: load and revalidate a persisted profile before displaying it.
+def load_profile(profile_path: Path) -> dict[str, object]:
+    payload = json.loads(profile_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or set(payload) != PROFILE_KEYS or payload.get("schema") != 1:
+        raise ValueError("managed profile schema is invalid")
+    settings = {name: payload[name] for name in PROFILE_KEYS - {"schema"}}
+    connection = connection_from_settings(settings, "0" * 64)
+    return profile_payload(connection)
+
+
+# ai-generated: write runtime config and the matching non-secret management profile.
+def write_managed_config(config_path: Path, profile_path: Path, connection: Connection) -> None:
+    write_config(config_path, connection)
+    write_profile(profile_path, connection)
+
+
 # ai-generated: command-line entrypoint for installation and later reconfiguration.
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--uri-file", type=Path, required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--uri-file", type=Path)
+    inputs.add_argument("--settings-file", type=Path)
+    inputs.add_argument("--show", action="store_true")
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--profile", type=Path, required=True)
     args = parser.parse_args()
     try:
-        uri = args.uri_file.read_text(encoding="utf-8")
-        connection = parse_uri(uri)
-        write_config(args.config, connection)
+        if args.show:
+            print(json.dumps(load_profile(args.profile), ensure_ascii=False, separators=(",", ":")))
+            return 0
+        if args.uri_file is not None:
+            uri = args.uri_file.read_text(encoding="utf-8")
+            connection = parse_uri(uri)
+        else:
+            payload = json.loads(args.settings_file.read_text(encoding="utf-8"))
+            connection = connection_from_settings(payload, read_current_key(args.config))
+        write_managed_config(args.config, args.profile, connection)
         print(f"configured {connection.provider}/{connection.transport}")
         return 0
-    except (OSError, ValueError) as exc:
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
         print(f"URI import error: {exc}", file=sys.stderr)
         return 2
 

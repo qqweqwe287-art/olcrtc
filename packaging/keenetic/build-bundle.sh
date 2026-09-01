@@ -22,7 +22,7 @@ case "$1" in
 esac
 mkdir -p "$(dirname -- "$output")"
 
-files='install.sh upgrade.sh uninstall.sh doctor.sh import-uri.sh run-client.sh S97olcrtc-web S98olcrtc-client client.example.yaml README.ru.md lib/common.sh lib/manifest.py lib/uri_import.py'
+files='install.sh upgrade.sh rollback.sh migration.sh uninstall.sh doctor.sh import-uri.sh run-client.sh S96olcrtc-native S97olcrtc-web client.example.yaml README.ru.md lib/common.sh lib/manifest.py lib/uri_import.py'
 for file in $files; do
     [ -f "$script_dir/$file" ] || {
         printf '%s\n' "missing bundle input: $file" >&2

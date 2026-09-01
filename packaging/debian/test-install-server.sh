@@ -26,7 +26,7 @@ die() {
     return 99
 }
 
-CONFIG_DIR=/etc/olcrtc
+CONFIG_DIR=/etc/olcrtc-native
 BUNDLE_DIR=/tmp/bundle
 CONFIG_SOURCE=
 INSTANCE=main

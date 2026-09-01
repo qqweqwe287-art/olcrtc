@@ -1,6 +1,6 @@
 # Установка сервера olcRTC на Debian 12
 
-Эта упаковка устанавливает официальный Go-бинарник olcRTC как непривилегированную systemd-службу. Она не содержит веб-панель и не изменяет маршруты сервера.
+Эта упаковка устанавливает официальный Go-бинарник olcRTC как непривилегированную systemd-службу и отдельную HTTPS-панель управления. Новый пакет использует namespace `olcrtc-native` и не заменяет службы или каталоги старого Manager.
 
 Первая версия упаковки поддерживает Debian 12 `amd64`. Бинарник `arm64` может присутствовать в выпуске для других платформ, но Debian bundle для `arm64` в manifest v1 пока не публикуется. Установщик явно остановится на такой системе.
 
@@ -34,29 +34,31 @@ chmod 0755 /tmp/install-server.sh
 /tmp/install-server.sh
 ```
 
-Без `--start` программа только устанавливает бинарник, unit и пример конфигурации. Placeholder-конфиг никогда не запускается автоматически.
+После установки откройте `https://IP_СЕРВЕРА:8443`. Сертификат при первой установке самоподписанный, поэтому браузер покажет предупреждение. Логин и одноразовый пароль находятся в `/root/olcrtc-native-admin.txt`. Удалите этот файл после сохранения пароля.
+
+Панель создаёт конфигурации и ключи, запускает инстансы, показывает журналы и диагностику, формирует Spec URI и QR, а также устанавливает обновления. Без `--start` placeholder-конфиг не запускается автоматически.
 
 ## Конфигурация
 
 Скопируйте пример и создайте отдельный ключ:
 
 ```sh
-install -o root -g olcrtc -m 0640 \
-  /etc/olcrtc/server.example.yaml /etc/olcrtc/main.yaml
-openssl rand -hex 32 | install -o root -g olcrtc -m 0640 \
-  /dev/stdin /etc/olcrtc/main.key
+install -o root -g olcrtc-native -m 0640 \
+  /etc/olcrtc-native/server.example.yaml /etc/olcrtc-native/main.yaml
+openssl rand -hex 32 | install -o root -g olcrtc-native -m 0640 \
+  /dev/stdin /etc/olcrtc-native/main.key
 ```
 
-Откройте `/etc/olcrtc/main.yaml` и замените полный URL комнаты Jitsi. Значение должно иметь вид `https://host.example/room-name`. `any` и URL без комнаты недопустимы.
+Откройте `/etc/olcrtc-native/main.yaml` и замените полный URL комнаты Jitsi. Значение должно иметь вид `https://host.example/room-name`. `any` и URL без комнаты недопустимы.
 
 Клиенту нужны тот же release tag, provider, transport, room и ключ. Ключ не публикуйте.
 
 Запуск:
 
 ```sh
-systemctl enable --now olcrtc-server@main.service
-systemctl status olcrtc-server@main.service
-journalctl -u olcrtc-server@main.service -f
+systemctl enable --now olcrtc-native@main.service
+systemctl status olcrtc-native@main.service
+journalctl -u olcrtc-native@main.service -f
 ```
 
 Проверка статуса systemd подтверждает только состояние серверного процесса. Сквозную работу туннеля проверяют через SOCKS5 на клиентской стороне.
@@ -69,7 +71,7 @@ journalctl -u olcrtc-server@main.service -f
 /tmp/install-server.sh --config /root/server.yaml --start
 ```
 
-Существующий `/etc/olcrtc/main.yaml` не заменяется. Для осознанной замены нужен флаг `--replace-config`.
+Существующий `/etc/olcrtc-native/main.yaml` не заменяется. Для осознанной замены нужен флаг `--replace-config`.
 
 Для второго сервера используйте другой instance:
 
@@ -77,7 +79,7 @@ journalctl -u olcrtc-server@main.service -f
 /tmp/install-server.sh --instance backup --config /root/backup.yaml --start
 ```
 
-Он запустится как `olcrtc-server@backup.service` с конфигом `/etc/olcrtc/backup.yaml`.
+Он запустится как `olcrtc-native@backup.service` с конфигом `/etc/olcrtc-native/backup.yaml`.
 
 ## Обновление и rollback
 
@@ -87,13 +89,13 @@ journalctl -u olcrtc-server@main.service -f
 /tmp/install-server.sh --release '<exact-tag>'
 ```
 
-Каждый бинарник хранится в `/usr/local/lib/olcrtc/releases/<tag>`. Ссылка `current` меняется атомарно. Если активный unit не может запуститься после замены, установщик возвращает предыдущую ссылку и unit, затем пытается перезапустить старую версию.
+Каждый бинарник хранится в `/usr/local/lib/olcrtc-native/releases/<tag>`. Ссылка `current` меняется атомарно. Если активный unit не может запуститься после замены, установщик возвращает предыдущую ссылку и unit, затем пытается перезапустить старую версию.
 
 Проверьте версию пары по manifest:
 
 ```sh
 sed -n -e '/^version\t/p' -e '/^upstream_commit\t/p' \
-  /usr/local/lib/olcrtc/current/manifest.tsv
+  /usr/local/lib/olcrtc-native/current/manifest.tsv
 ```
 
 ## Удаление
@@ -101,13 +103,13 @@ sed -n -e '/^version\t/p' -e '/^upstream_commit\t/p' \
 Удалить программу и сохранить конфиги/state:
 
 ```sh
-/usr/local/sbin/olcrtc-uninstall-server
+/usr/local/sbin/olcrtc-native-uninstall-server
 ```
 
-Полностью удалить также `/etc/olcrtc`, `/var/lib/olcrtc` и service account:
+Полностью удалить также `/etc/olcrtc-native`, `/var/lib/olcrtc-native` и service account:
 
 ```sh
-/usr/local/sbin/olcrtc-uninstall-server --purge
+/usr/local/sbin/olcrtc-native-uninstall-server --purge
 ```
 
 `--purge` необратим. Перед ним сохраните YAML и ключи в безопасном месте.
@@ -115,13 +117,14 @@ sed -n -e '/^version\t/p' -e '/^upstream_commit\t/p' \
 ## Системные пути
 
 ```text
-/usr/local/lib/olcrtc/releases/<tag>/olcrtc
-/usr/local/lib/olcrtc/current
-/usr/local/bin/olcrtc
-/etc/olcrtc/<instance>.yaml
-/etc/olcrtc/<instance>.key
-/var/lib/olcrtc/<instance>/
-/etc/systemd/system/olcrtc-server@.service
+/usr/local/lib/olcrtc-native/releases/<tag>/olcrtc
+/usr/local/lib/olcrtc-native/current
+/usr/local/bin/olcrtc-native
+/etc/olcrtc-native/<instance>.yaml
+/etc/olcrtc-native/<instance>.key
+/var/lib/olcrtc-native/<instance>/
+/etc/systemd/system/olcrtc-native@.service
+/etc/systemd/system/olcrtc-native-admin.service
 ```
 
-Сервис работает от пользователя `olcrtc`, не имеет Linux capabilities и получает только сетевые семейства `AF_INET`, `AF_INET6`, `AF_UNIX`. Журналы находятся в systemd journal. Секретные файлы не должны иметь права шире `0640`.
+Сервер работает от пользователя `olcrtc-native`, не имеет Linux capabilities и получает только сетевые семейства `AF_INET`, `AF_INET6`, `AF_UNIX`. Журналы находятся в systemd journal. Секретные файлы не должны иметь права шире `0640`.

@@ -1,5 +1,5 @@
 #!/bin/sh
-# ai-generated: Entware init service for the olcRTC client supervisor.
+# ai-generated: Entware init service for the isolated native olcRTC client.
 
 # shellcheck disable=SC1091 # runtime path exists only after bundle installation.
 . /opt/lib/olcrtc-keenetic/lib/common.sh
@@ -27,6 +27,10 @@ stop_pid_file() {
 
 case "${1:-start}" in
     start)
+        if [ ! -f "$OLCRTC_ENABLED" ]; then
+            olc_log "native client is disabled; use migration.sh cutover or enable"
+            exit 0
+        fi
         [ -x "$OLCRTC_BIN" ] || olc_die "client binary is missing"
         [ -s "$OLCRTC_CONFIG" ] || olc_die "client configuration is missing"
         if olc_pid_alive "$OLCRTC_RUNNER_PID" "run-client.sh"; then
@@ -55,6 +59,10 @@ case "${1:-start}" in
         "$0" start
         ;;
     status)
+        if [ ! -f "$OLCRTC_ENABLED" ]; then
+            printf '%s\n' "disabled"
+            exit 3
+        fi
         if [ -s "$OLCRTC_BLOCKED" ]; then
             printf 'blocked: %s\n' "$(sed -n '1p' "$OLCRTC_BLOCKED")"
             exit 1

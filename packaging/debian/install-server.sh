@@ -2,7 +2,7 @@
 # ai-generated: verified, rollback-capable Debian server installer.
 set -eu
 
-PROGRAM=olcrtc-server-installer
+PROGRAM=olcrtc-native-installer
 DEFAULT_REPOSITORY=qqweqwe287-art/olcrtc
 REPOSITORY=${OLCRTC_RELEASE_REPOSITORY:-$DEFAULT_REPOSITORY}
 RELEASE=${OLCRTC_RELEASE:-latest}
@@ -10,16 +10,19 @@ INSTANCE=main
 CONFIG_SOURCE=
 REPLACE_CONFIG=0
 START_SERVICE=0
+MIGRATE_V011=0
 MANIFEST_PIN=${OLCRTC_MANIFEST_SHA256:-}
 
-LIB_DIR=/usr/local/lib/olcrtc
+LIB_DIR=/usr/local/lib/olcrtc-native
 RELEASES_DIR=$LIB_DIR/releases
 CURRENT_LINK=$LIB_DIR/current
-CONFIG_DIR=/etc/olcrtc
-STATE_DIR=/var/lib/olcrtc
-UNIT_PATH=/etc/systemd/system/olcrtc-server@.service
-UNINSTALL_PATH=/usr/local/sbin/olcrtc-uninstall-server
-BIN_LINK=/usr/local/bin/olcrtc
+CONFIG_DIR=/etc/olcrtc-native
+STATE_DIR=/var/lib/olcrtc-native
+UNIT_PATH=/etc/systemd/system/olcrtc-native@.service
+ADMIN_UNIT_PATH=/etc/systemd/system/olcrtc-native-admin.service
+UNINSTALL_PATH=/usr/local/sbin/olcrtc-native-uninstall-server
+INSTALL_PATH=/usr/local/sbin/olcrtc-native-install-server
+BIN_LINK=/usr/local/bin/olcrtc-native
 TMP_DIR=
 
 # ai-generated
@@ -43,9 +46,10 @@ Options:
   --repository OWNER/REPO
                         release repository (default: qqweqwe287-art/olcrtc)
   --instance NAME       systemd instance and config name (default: main)
-  --config FILE         install this YAML as /etc/olcrtc/NAME.yaml
+  --config FILE         install this YAML as /etc/olcrtc-native/NAME.yaml
   --replace-config      allow --config to replace an existing config
   --start               enable and start the selected instance
+  --migrate-v0.1.1      explicitly migrate one prior fork instance after backup
   -h, --help            show this help
 
 Environment:
@@ -125,6 +129,7 @@ parse_args() {
             --config=*) CONFIG_SOURCE=${1#*=}; shift ;;
             --replace-config) REPLACE_CONFIG=1; shift ;;
             --start) START_SERVICE=1; shift ;;
+            --migrate-v0.1.1) MIGRATE_V011=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) die "unknown option: $1" ;;
         esac
@@ -150,7 +155,7 @@ check_debian() {
 # ai-generated
 ensure_dependencies() {
     missing=
-    for command_name in curl sha256sum stat tar gzip awk sed grep install systemctl useradd getent; do
+    for command_name in curl sha256sum stat tar gzip awk sed grep install systemctl useradd getent python3 base64 openssl qrencode; do
         if ! command -v "$command_name" >/dev/null 2>&1; then
             missing="$missing $command_name"
         fi
@@ -160,9 +165,9 @@ ensure_dependencies() {
     say "installing required Debian packages"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y --no-install-recommends ca-certificates curl coreutils tar gzip systemd passwd
+    apt-get install -y --no-install-recommends ca-certificates curl coreutils tar gzip systemd passwd python3 openssl qrencode
 
-    for command_name in curl sha256sum stat tar gzip awk sed grep install systemctl useradd getent; do
+    for command_name in curl sha256sum stat tar gzip awk sed grep install systemctl useradd getent python3 base64 openssl qrencode; do
         command -v "$command_name" >/dev/null 2>&1 || die "required command is still missing: $command_name"
     done
 }
@@ -362,19 +367,19 @@ extract_bundle() {
     [ -s "$listing" ] || die "Debian bundle is empty"
     while IFS= read -r entry; do
         case "$entry" in
-            README.ru.md|build-bundle.sh|install-server.sh|olcrtc-server@.service|server.example.yaml|uninstall-server.sh) ;;
+            README.ru.md|build-bundle.sh|install-server.sh|olcrtc-admin.py|olcrtc-native-admin.service|olcrtc-native@.service|server.example.yaml|uninstall-server.sh) ;;
             *) die "unexpected path in Debian bundle: $entry" ;;
         esac
     done <"$listing"
 
-    for required in olcrtc-server@.service server.example.yaml uninstall-server.sh; do
+    for required in install-server.sh olcrtc-admin.py olcrtc-native-admin.service olcrtc-native@.service server.example.yaml uninstall-server.sh; do
         [ "$(grep -Fxc "$required" "$listing")" -eq 1 ] || die "bundle must contain exactly one $required"
     done
 
     tar -tvzf "$BUNDLE_FILE" | awk '$1 !~ /^-/ { exit 1 }' || die "bundle contains a non-regular entry"
     tar -xzf "$BUNDLE_FILE" -C "$BUNDLE_DIR"
 
-    for required in olcrtc-server@.service server.example.yaml uninstall-server.sh; do
+    for required in install-server.sh olcrtc-admin.py olcrtc-native-admin.service olcrtc-native@.service server.example.yaml uninstall-server.sh; do
         if [ ! -f "$BUNDLE_DIR/$required" ] || [ -L "$BUNDLE_DIR/$required" ]; then
             die "invalid extracted file: $required"
         fi
@@ -393,20 +398,20 @@ smoke_test_binary() {
 
 # ai-generated
 ensure_service_user() {
-    if ! getent group olcrtc >/dev/null 2>&1; then
-        groupadd --system olcrtc
+    if ! getent group olcrtc-native >/dev/null 2>&1; then
+        groupadd --system olcrtc-native
     fi
-    if ! getent passwd olcrtc >/dev/null 2>&1; then
-        useradd --system --gid olcrtc --home-dir "$STATE_DIR" --shell /usr/sbin/nologin olcrtc
+    if ! getent passwd olcrtc-native >/dev/null 2>&1; then
+        useradd --system --gid olcrtc-native --home-dir "$STATE_DIR" --shell /usr/sbin/nologin olcrtc-native
     fi
 }
 
 # ai-generated
 install_config() {
     mkdir -p "$CONFIG_DIR"
-    chown root:olcrtc "$CONFIG_DIR"
+    chown root:olcrtc-native "$CONFIG_DIR"
     chmod 0750 "$CONFIG_DIR"
-    install -o root -g olcrtc -m 0640 "$BUNDLE_DIR/server.example.yaml" "$CONFIG_DIR/server.example.yaml"
+    [ -e "$CONFIG_DIR/server.example.yaml" ] || install -o root -g olcrtc-native -m 0640 "$BUNDLE_DIR/server.example.yaml" "$CONFIG_DIR/server.example.yaml"
 
     if [ -z "$CONFIG_SOURCE" ]; then
         return 0
@@ -422,12 +427,77 @@ install_config() {
     if grep -Eq "REPLACE_ME|^[[:space:]]*id:[[:space:]]*['\"]?any['\"]?([[:space:]]*#.*)?$" "$CONFIG_SOURCE"; then
         die "config contains a placeholder or room.id=any"
     fi
-    install -o root -g olcrtc -m 0640 "$CONFIG_SOURCE" "$target"
+    install -o root -g olcrtc-native -m 0640 "$CONFIG_SOURCE" "$target"
+}
+
+# ai-generated
+install_admin_credentials() {
+    credential=$CONFIG_DIR/admin.credentials
+    [ -e "$credential" ] && return
+    password=$(dd if=/dev/urandom bs=24 count=1 2>/dev/null | base64 | tr -d '\n')
+    [ -n "$password" ] || die "could not generate admin password"
+    password_file=$TMP_DIR/admin-password
+    umask 077
+    printf '%s\n' "$password" >"$password_file"
+    python3 "$BUNDLE_DIR/olcrtc-admin.py" --init-credentials "$credential" --password-file "$password_file" \
+        || die "could not initialize admin credentials"
+    chown root:root "$credential"
+    chmod 0600 "$credential"
+    recovery=/root/olcrtc-native-admin.txt
+    printf 'URL: https://SERVER_IP:8443\nLogin: admin\nPassword: %s\n' "$password" >"$recovery"
+    chmod 0600 "$recovery"
+    unset password
+    rm -f -- "$password_file"
+    say "one-time admin credentials: $recovery"
+}
+
+# ai-generated: create a private self-signed TLS identity for the public admin listener.
+install_admin_tls() {
+    certificate=$CONFIG_DIR/admin.crt
+    private_key=$CONFIG_DIR/admin.key
+    if [ -s "$certificate" ] && [ -s "$private_key" ]; then
+        return
+    fi
+    rm -f -- "$certificate" "$private_key"
+    openssl req -x509 -newkey rsa:2048 -sha256 -days 825 -nodes \
+        -subj /CN=olcrtc-admin -keyout "$private_key" -out "$certificate" >/dev/null 2>&1 \
+        || die "could not create the admin TLS certificate"
+    chown root:root "$certificate" "$private_key"
+    chmod 0644 "$certificate"
+    chmod 0600 "$private_key"
+}
+
+# ai-generated
+prepare_v011_migration() {
+    [ "$MIGRATE_V011" -eq 1 ] || return
+    legacy_lib=/usr/local/lib/olcrtc
+    legacy_config=/etc/olcrtc/$INSTANCE.yaml
+    legacy_unit=/etc/systemd/system/olcrtc-server@.service
+    [ -d "$legacy_lib" ] || die "v0.1.1 fork files were not found"
+    [ -f "$legacy_config" ] && [ ! -L "$legacy_config" ] || die "legacy config is not a regular file: $legacy_config"
+    [ -f "$legacy_unit" ] || die "legacy template was not found"
+    grep -Fqx 'ExecStart=/usr/local/lib/olcrtc/current/olcrtc /etc/olcrtc/%i.yaml' "$legacy_unit" || \
+        die "legacy template does not match the prior fork package; it may belong to Oleglog Manager"
+    backup=/var/backups/olcrtc-native/v0.1.1-$INSTANCE-$(date +%Y%m%d%H%M%S)
+    mkdir -p "$backup"
+    cp -p "$legacy_config" "$backup/$INSTANCE.yaml"
+    legacy_key=/etc/olcrtc/$INSTANCE.key
+    if [ -f "$legacy_key" ] && [ ! -L "$legacy_key" ]; then
+        cp -p "$legacy_key" "$backup/$INSTANCE.key"
+    fi
+    mkdir -p "$CONFIG_DIR"
+    [ ! -e "$CONFIG_DIR/$INSTANCE.yaml" ] || die "new namespace already has $INSTANCE.yaml"
+    install -o root -g olcrtc-native -m 0640 "$legacy_config" "$CONFIG_DIR/$INSTANCE.yaml"
+    if [ -f "$legacy_key" ] && [ ! -L "$legacy_key" ]; then
+        install -o root -g olcrtc-native -m 0640 "$legacy_key" "$CONFIG_DIR/$INSTANCE.key"
+    fi
+    LEGACY_UNIT=olcrtc-server@$INSTANCE.service
+    say "prepared explicit v0.1.1 migration; backup: $backup"
 }
 
 # ai-generated
 active_units() {
-    systemctl list-units --type=service --state=active --no-legend 'olcrtc-server@*.service' 2>/dev/null |
+    systemctl list-units --type=service --state=active --no-legend 'olcrtc-native@*.service' 2>/dev/null |
         awk '{print $1}'
 }
 
@@ -435,7 +505,9 @@ active_units() {
 activate_release() {
     old_target=
     old_unit=$TMP_DIR/old-unit
+    old_admin_unit=$TMP_DIR/old-admin-unit
     had_old_unit=0
+    had_old_admin_unit=0
     if [ -L "$CURRENT_LINK" ]; then
         old_target=$(readlink "$CURRENT_LINK")
     elif [ -e "$CURRENT_LINK" ]; then
@@ -445,6 +517,10 @@ activate_release() {
         cp "$UNIT_PATH" "$old_unit"
         had_old_unit=1
     fi
+    if [ -f "$ADMIN_UNIT_PATH" ]; then
+        cp "$ADMIN_UNIT_PATH" "$old_admin_unit"
+        had_old_admin_unit=1
+    fi
 
     release_dir=$RELEASES_DIR/$RELEASE
     stage_dir=$RELEASES_DIR/.stage.$$
@@ -452,28 +528,33 @@ activate_release() {
     rm -rf -- "$stage_dir"
     mkdir -m 0755 "$stage_dir"
     install -o root -g root -m 0755 "$CORE_FILE" "$stage_dir/olcrtc"
+    install -o root -g root -m 0755 "$BUNDLE_DIR/olcrtc-admin.py" "$stage_dir/olcrtc-admin.py"
     install -o root -g root -m 0644 "$MANIFEST" "$stage_dir/manifest.tsv"
 
     if [ -e "$release_dir" ]; then
         installed_sha=$(sha256sum "$release_dir/olcrtc" 2>/dev/null | awk '{print $1}')
         downloaded_sha=$(sha256sum "$CORE_FILE" | awk '{print $1}')
         [ "$installed_sha" = "$downloaded_sha" ] || die "release directory already exists with different content: $release_dir"
+        [ -f "$release_dir/olcrtc-admin.py" ] || die "release directory is incomplete: $release_dir"
         rm -rf -- "$stage_dir"
     else
         mv "$stage_dir" "$release_dir"
     fi
 
-    install -o root -g root -m 0644 "$BUNDLE_DIR/olcrtc-server@.service" "$UNIT_PATH"
+    install -o root -g root -m 0644 "$BUNDLE_DIR/olcrtc-native@.service" "$UNIT_PATH"
     install -o root -g root -m 0755 "$BUNDLE_DIR/uninstall-server.sh" "$UNINSTALL_PATH"
+    install -o root -g root -m 0755 "$BUNDLE_DIR/install-server.sh" "$INSTALL_PATH"
+    install -o root -g root -m 0644 "$BUNDLE_DIR/olcrtc-native-admin.service" "$ADMIN_UNIT_PATH"
     ln -sfn "$LIB_DIR/current/olcrtc" "$BIN_LINK"
     new_link=$LIB_DIR/.current.$$
     ln -s "releases/$RELEASE" "$new_link"
     mv -Tf "$new_link" "$CURRENT_LINK"
     systemctl daemon-reload
+    systemctl enable olcrtc-native-admin.service
 
     units=$(active_units)
     if [ "$START_SERVICE" -eq 1 ]; then
-        selected_unit=olcrtc-server@$INSTANCE.service
+        selected_unit=olcrtc-native@$INSTANCE.service
         case " $units " in
             *" $selected_unit "*) ;;
             *) units="$units $selected_unit" ;;
@@ -483,7 +564,13 @@ activate_release() {
     fi
 
     failed=0
+    if ! systemctl restart olcrtc-native-admin.service; then
+        failed=1
+    elif ! systemctl is-active --quiet olcrtc-native-admin.service; then
+        failed=1
+    fi
     for unit in $units; do
+        [ "$failed" -eq 0 ] || break
         if ! systemctl restart "$unit"; then
             failed=1
             break
@@ -496,6 +583,10 @@ activate_release() {
     done
 
     if [ "$failed" -eq 0 ]; then
+        if [ -n "${LEGACY_UNIT:-}" ] && [ "$START_SERVICE" -eq 1 ]; then
+            systemctl disable --now "$LEGACY_UNIT"
+            say "stopped migrated legacy instance $LEGACY_UNIT"
+        fi
         return
     fi
 
@@ -512,7 +603,16 @@ activate_release() {
     else
         rm -f -- "$UNIT_PATH"
     fi
+    if [ "$had_old_admin_unit" -eq 1 ]; then
+        install -o root -g root -m 0644 "$old_admin_unit" "$ADMIN_UNIT_PATH"
+    else
+        systemctl disable --now olcrtc-native-admin.service >/dev/null 2>&1 || true
+        rm -f -- "$ADMIN_UNIT_PATH"
+    fi
     systemctl daemon-reload
+    if [ "$had_old_admin_unit" -eq 1 ]; then
+        systemctl restart olcrtc-native-admin.service >/dev/null 2>&1 || true
+    fi
     for unit in $units; do
         systemctl restart "$unit" >/dev/null 2>&1 || true
     done
@@ -537,16 +637,20 @@ extract_bundle
 smoke_test_binary
 ensure_service_user
 mkdir -p "$STATE_DIR"
-chown root:olcrtc "$STATE_DIR"
+chown root:olcrtc-native "$STATE_DIR"
 chmod 0750 "$STATE_DIR"
 install_config
+prepare_v011_migration
+install_admin_credentials
+install_admin_tls
 activate_release
 
 say "installed release $RELEASE"
 say "example config: $CONFIG_DIR/server.example.yaml"
 say "release metadata: $CURRENT_LINK/manifest.tsv"
+say "admin UI: https://SERVER_IP:8443 (self-signed TLS)"
 if [ "$START_SERVICE" -eq 1 ]; then
-    say "service: olcrtc-server@$INSTANCE.service"
+    say "service: olcrtc-native@$INSTANCE.service"
 else
     say "service was not started; configure $CONFIG_DIR/$INSTANCE.yaml first"
 fi

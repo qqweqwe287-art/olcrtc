@@ -1,5 +1,5 @@
 # ai-generated: safe placeholder for one Debian server instance.
-# Copy this file to /etc/olcrtc/main.yaml and replace every placeholder.
+# Copy this file to /etc/olcrtc-native/main.yaml and replace every placeholder.
 # Keep the client and server on the same release from manifest.tsv.
 mode: srv
 auth:

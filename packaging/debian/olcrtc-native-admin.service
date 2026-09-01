@@ -1,0 +1,38 @@
+[Unit]
+Description=olcRTC native local administration UI
+Documentation=https://github.com/qqweqwe287-art/olcrtc/tree/master/packaging/debian
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/lib/olcrtc-native/current/olcrtc-admin.py --listen 0.0.0.0 --port 8443 --cert /etc/olcrtc-native/admin.crt --key /etc/olcrtc-native/admin.key
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/etc/olcrtc-native /etc/systemd/system /usr/local/bin /usr/local/lib/olcrtc-native /usr/local/sbin /var/lib/olcrtc-native
+
+[Install]
+WantedBy=multi-user.target

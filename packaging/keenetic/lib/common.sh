@@ -8,10 +8,14 @@ OLCRTC_BIN="$OLCRTC_PREFIX/bin/olcrtc"
 OLCRTC_LIB="$OLCRTC_PREFIX/lib/$OLCRTC_NAME"
 OLCRTC_ETC="$OLCRTC_PREFIX/etc/$OLCRTC_NAME"
 OLCRTC_CONFIG="$OLCRTC_ETC/client.yaml"
+OLCRTC_PROFILE="$OLCRTC_ETC/profile.json"
 OLCRTC_LOG="$OLCRTC_PREFIX/var/log/$OLCRTC_NAME"
 OLCRTC_RUN="$OLCRTC_PREFIX/var/run/$OLCRTC_NAME"
 OLCRTC_STATE="$OLCRTC_PREFIX/var/lib/$OLCRTC_NAME"
-OLCRTC_INIT="$OLCRTC_PREFIX/etc/init.d/S98olcrtc-client"
+OLCRTC_INIT="$OLCRTC_PREFIX/etc/init.d/S96olcrtc-native"
+OLCRTC_ENABLED="$OLCRTC_ETC/native.enabled"
+OLCRTC_LEGACY_INIT="$OLCRTC_PREFIX/etc/init.d/S98olcrtc-client"
+OLCRTC_LEGACY_DISABLED="$OLCRTC_PREFIX/etc/init.d/S98olcrtc-client.olcrtc-disabled"
 OLCRTC_RUNNER_PID="$OLCRTC_RUN/supervisor.pid"
 OLCRTC_CHILD_PID="$OLCRTC_RUN/client.pid"
 OLCRTC_BLOCKED="$OLCRTC_RUN/blocked.reason"
@@ -24,6 +28,7 @@ OLCRTC_WEB_INIT="$OLCRTC_PREFIX/etc/init.d/S97olcrtc-web"
 OLCRTC_WEB_CONFIG="$OLCRTC_ETC/web.json"
 OLCRTC_WEB_PID="$OLCRTC_RUN/web.pid"
 OLCRTC_WEB_LOG="$OLCRTC_LOG/web.log"
+OLCRTC_CONFIG_BACKUP="$OLCRTC_STATE/config.previous"
 
 # ai-generated: print a stable operator-facing status line.
 olc_log() {
@@ -60,8 +65,8 @@ olc_secure_permissions() {
     chown "$OLCRTC_RUN_USER":"$run_group" "$OLCRTC_LOG" "$OLCRTC_RUN" "$OLCRTC_STATE" 2>/dev/null || true
     chmod 750 "$OLCRTC_ETC"
     chmod 700 "$OLCRTC_LOG" "$OLCRTC_RUN" "$OLCRTC_STATE"
-    chown root:"$run_group" "$OLCRTC_CONFIG" "$OLCRTC_ETC"/secret-*.key 2>/dev/null || true
-    chmod 640 "$OLCRTC_CONFIG" "$OLCRTC_ETC"/secret-*.key 2>/dev/null || true
+    chown root:"$run_group" "$OLCRTC_CONFIG" "$OLCRTC_PROFILE" "$OLCRTC_ETC"/secret-*.key 2>/dev/null || true
+    chmod 640 "$OLCRTC_CONFIG" "$OLCRTC_PROFILE" "$OLCRTC_ETC"/secret-*.key 2>/dev/null || true
     chown root:root "$OLCRTC_WEB_CONFIG" 2>/dev/null || true
     chmod 600 "$OLCRTC_WEB_CONFIG" 2>/dev/null || true
 }

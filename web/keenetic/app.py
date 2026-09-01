@@ -11,6 +11,7 @@ import getpass
 import hashlib
 import hmac
 import http.cookies
+import ipaddress
 import json
 import os
 import re
@@ -34,6 +35,15 @@ LOGIN_ATTEMPTS = 5
 MAX_BODY_BYTES = 128 * 1024
 HEX_SECRET_RE = re.compile(r"(?i)(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")
 YAML_SECRET_RE = re.compile(r"(?im)^(\s*(?:key|token|pass|password)\s*:\s*).+$")
+ENV_SECRET_RE = re.compile(
+    r"(?im)^(\s*(?:OLCRTC_(?:KEY|AUTH_TOKEN|ADMIN_PASS|ADMIN_TOKEN)|AUTHORIZATION)\s*=\s*).+$"
+)
+JSON_SECRET_RE = re.compile(
+    r'(?i)("(?:key|token|pass|password|password_hash)"\s*:\s*)"[^"]*"'
+)
+LAN_NETWORKS = tuple(
+    ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
 
 
 @dataclass(frozen=True)
@@ -162,6 +172,21 @@ class ControlHandler(BaseHTTPRequestHandler):
             content = read_text(Path(settings.client_config), 64 * 1024)
             self._json({"ok": content is not None, "content": redact(content or "")})
             return
+        if self.path == "/api/profile":
+            if not self._require_auth():
+                return
+            helper = self._state().settings.config_helper
+            ok, output = run_command([helper, "--show"], 8)
+            if not ok:
+                self._json({"ok": False, "profile": None, "output": redact(output)})
+                return
+            try:
+                profile = json.loads(output)
+            except json.JSONDecodeError:
+                self._json({"error": "profile_invalid"}, HTTPStatus.BAD_GATEWAY)
+                return
+            self._json({"ok": True, "profile": profile})
+            return
         self._json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
     # ai-generated: route mutating HTTP requests with origin and CSRF checks.
@@ -188,6 +213,9 @@ class ControlHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/import-uri":
             self._import_uri(payload)
+            return
+        if self.path == "/api/settings":
+            self._save_settings(payload)
             return
         self._json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
@@ -231,6 +259,11 @@ class ControlHandler(BaseHTTPRequestHandler):
             "restart": [settings.client_service, "restart"],
             "probe": [settings.doctor],
             "diagnostics": [settings.doctor, "--quick"],
+            "enable-native": ["/opt/lib/olcrtc-keenetic/migration.sh", "enable"],
+            "cutover": ["/opt/lib/olcrtc-keenetic/migration.sh", "cutover"],
+            "legacy-rollback": ["/opt/lib/olcrtc-keenetic/migration.sh", "rollback"],
+            "update": ["/opt/lib/olcrtc-keenetic/upgrade.sh"],
+            "binary-rollback": ["/opt/lib/olcrtc-keenetic/rollback.sh"],
         }
         command = commands.get(action)
         if command is None:
@@ -247,6 +280,20 @@ class ControlHandler(BaseHTTPRequestHandler):
             return
         helper = self._state().settings.config_helper
         ok, output = run_command([helper, "--stdin"], 15, uri + "\n")
+        self._json({"ok": ok, "output": redact(output)}, HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST)
+
+    # ai-generated: validate and persist non-secret client settings through the fixed helper.
+    def _save_settings(self, payload: dict[str, Any]) -> None:
+        profile = payload.get("profile")
+        if not isinstance(profile, dict):
+            self._json({"error": "profile_required"}, HTTPStatus.BAD_REQUEST)
+            return
+        encoded = json.dumps(profile, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded) > 32768:
+            self._json({"error": "profile_too_large"}, HTTPStatus.BAD_REQUEST)
+            return
+        helper = self._state().settings.config_helper
+        ok, output = run_command([helper, "--settings-stdin"], 15, encoded)
         self._json({"ok": ok, "output": redact(output)}, HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST)
 
     # ai-generated: combine process, SOCKS and diagnostic status.
@@ -397,7 +444,9 @@ def verify_password(password: str, encoded: str) -> bool:
 # ai-generated: redact common olcRTC secret forms from diagnostics.
 def redact(value: str) -> str:
     value = HEX_SECRET_RE.sub("[redacted-64hex]", value)
-    return YAML_SECRET_RE.sub(r"\1[redacted]", value)
+    value = YAML_SECRET_RE.sub(r"\1[redacted]", value)
+    value = ENV_SECRET_RE.sub(r"\1[redacted]", value)
+    return JSON_SECRET_RE.sub(r'\1"[redacted]"', value)
 
 
 # ai-generated: run one fixed argument vector without invoking a shell.
@@ -431,25 +480,52 @@ def read_text(path: Path, limit: int) -> str | None:
 
 
 # ai-generated: load and validate persistent web settings.
+# ai-generated: permit only loopback or an explicitly enabled RFC1918 listener.
+def validate_bind_address(bind: str, allow_lan: bool) -> None:
+    if bind == "localhost":
+        return
+    try:
+        address = ipaddress.ip_address(bind)
+    except ValueError as exc:
+        raise ValueError("bind must be a numeric loopback or RFC1918 address") from exc
+    if address.is_loopback:
+        return
+    if address.version != 4 or not any(address in network for network in LAN_NETWORKS):
+        raise ValueError("public, wildcard and non-RFC1918 bind addresses are not allowed")
+    if not allow_lan:
+        raise ValueError("RFC1918 bind requires allow_lan=true")
+
+
+# ai-generated: load settings only when every security-relevant JSON type is exact.
 def load_settings(path: Path) -> Settings:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("settings must be a JSON object")
+    bind = payload.get("bind", "127.0.0.1")
+    port = payload.get("port", 8091)
+    allow_lan = payload.get("allow_lan", False)
+    username = payload.get("username", "admin")
+    password_hash = payload.get("password_hash", "")
+    if not isinstance(bind, str):
+        raise ValueError("bind must be a string")
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise ValueError("port must be an integer")
+    if not isinstance(allow_lan, bool):
+        raise ValueError("allow_lan must be a boolean")
+    if not isinstance(username, str) or not isinstance(password_hash, str):
+        raise ValueError("username and password_hash must be strings")
     settings = Settings(
-        bind=str(payload.get("bind", "127.0.0.1")),
-        port=int(payload.get("port", 8091)),
-        allow_lan=bool(payload.get("allow_lan", False)),
-        username=str(payload.get("username", "admin")),
-        password_hash=str(payload.get("password_hash", "")),
-        client_service=str(payload.get("client_service", "/opt/etc/init.d/S98olcrtc-client")),
+        bind=bind,
+        port=port,
+        allow_lan=allow_lan,
+        username=username,
+        password_hash=password_hash,
+        client_service=str(payload.get("client_service", "/opt/etc/init.d/S96olcrtc-native")),
         doctor=str(payload.get("doctor", "/opt/lib/olcrtc-keenetic/doctor.sh")),
         config_helper=str(payload.get("config_helper", "/opt/lib/olcrtc-keenetic/import-uri.sh")),
         client_config=str(payload.get("client_config", "/opt/etc/olcrtc-keenetic/client.yaml")),
     )
-    if settings.bind in {"0.0.0.0", "::", ""}:
-        raise ValueError("wildcard bind is not allowed")
-    if settings.bind not in {"127.0.0.1", "::1", "localhost"} and not settings.allow_lan:
-        raise ValueError("non-loopback bind requires allow_lan=true")
+    validate_bind_address(settings.bind, settings.allow_lan)
     if not 1 <= settings.port <= 65535:
         raise ValueError("port is out of range")
     if not settings.username or not settings.password_hash:
@@ -463,12 +539,17 @@ def initialize_settings(
 ) -> None:
     if path.exists():
         raise FileExistsError(f"settings already exist: {path}")
+    validate_bind_address(bind, allow_lan)
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("port is out of range")
     if password_file is None:
         password = getpass.getpass("New web password (minimum 12 characters): ")
         confirm = getpass.getpass("Repeat web password: ")
         if not hmac.compare_digest(password, confirm):
             raise ValueError("passwords do not match")
     else:
+        if password_file.stat().st_size > 4096:
+            raise ValueError("password file is too large")
         password = password_file.read_text(encoding="utf-8").rstrip("\r\n")
     payload = {
         "bind": bind,
@@ -476,7 +557,7 @@ def initialize_settings(
         "allow_lan": allow_lan,
         "username": "admin",
         "password_hash": hash_password(password),
-        "client_service": "/opt/etc/init.d/S98olcrtc-client",
+        "client_service": "/opt/etc/init.d/S96olcrtc-native",
         "doctor": "/opt/lib/olcrtc-keenetic/doctor.sh",
         "config_helper": "/opt/lib/olcrtc-keenetic/import-uri.sh",
         "client_config": "/opt/etc/olcrtc-keenetic/client.yaml",
@@ -528,14 +609,16 @@ def main() -> int:
 INDEX_HTML = r"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>olcRTC</title><style>
-:root{color-scheme:dark;--bg:#0b1118;--card:#121c26;--line:#263747;--text:#e7eef5;--muted:#91a3b5;--ok:#54d18b;--bad:#ff6b6b;--accent:#46a6ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}main{max-width:960px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between}h1{font-size:24px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}button,input{font:inherit;border-radius:9px;border:1px solid var(--line);padding:10px 12px}button{background:#1b3145;color:var(--text);cursor:pointer}button.primary{background:var(--accent);color:#07121d}input{width:100%;background:#0b141d;color:var(--text)}pre{white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto;color:#c8d5e0}.muted{color:var(--muted)}.hidden{display:none}.ok{color:var(--ok)}.bad{color:var(--bad)}.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1;min-width:110px}
+:root{color-scheme:dark;--bg:#0b1118;--card:#121c26;--line:#263747;--text:#e7eef5;--muted:#91a3b5;--ok:#54d18b;--bad:#ff6b6b;--accent:#46a6ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}main{max-width:960px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between}h1{font-size:24px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}button,input,select{font:inherit;border-radius:9px;border:1px solid var(--line);padding:10px 12px}button{background:#1b3145;color:var(--text);cursor:pointer}button.primary{background:var(--accent);color:#07121d}input,select{width:100%;background:#0b141d;color:var(--text)}label{display:grid;gap:6px;color:var(--muted)}pre{white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto;color:#c8d5e0}.muted{color:var(--muted)}.hidden{display:none}.ok{color:var(--ok)}.bad{color:var(--bad)}.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1;min-width:110px}
 </style></head><body><main><div class="top"><h1>olcRTC</h1><button id="logout" class="hidden">Выйти</button></div>
 <section id="login" class="card"><h2>Вход</h2><div class="grid"><input id="user" value="admin" autocomplete="username"><input id="pass" type="password" placeholder="Пароль" autocomplete="current-password"></div><p><button id="loginBtn" class="primary">Войти</button> <span id="loginMsg" class="bad"></span></p></section>
 <div id="app" class="hidden"><section class="card"><div class="top"><h2>Состояние</h2><button id="refresh">Обновить</button></div><p id="health" class="muted">Проверка...</p><pre id="status"></pre><div class="row"><button data-action="start">Запустить</button><button data-action="restart">Перезапустить</button><button data-action="stop">Остановить</button><button data-action="probe">Проверить SOCKS</button><button data-action="diagnostics">Диагностика</button></div></section>
 <section class="card"><h2>Подключение</h2><p class="muted">Принимается только canonical olcrtc:// URI. Секрет не показывается повторно.</p><input id="uri" type="password" placeholder="olcrtc://..."><p><button id="importBtn" class="primary">Проверить и применить</button> <span id="importMsg"></span></p></section>
+<section class="card"><h2>Параметры клиента</h2><div class="grid"><label>Provider<select id="provider"><option>jitsi</option><option>telemost</option><option>wbstream</option></select></label><label>Transport<select id="transport"><option>datachannel</option><option>vp8channel</option><option>seichannel</option><option>videochannel</option></select></label><label>Комната<input id="room" placeholder="https://meet.example/room"></label></div><p><button id="loadProfile">Загрузить</button> <button id="saveProfile" class="primary">Сохранить</button> <span id="profileMsg"></span></p><p class="muted">Расширенные параметры transport сохраняются при импорте URI. Форма меняет основные совместимые поля, не показывая ключ.</p></section>
+<section class="card"><h2>Миграция и обновление</h2><p class="muted">Если старый клиент занимает SOCKS-порт, используйте «Переключить». При ошибке старая служба запускается обратно.</p><div class="row"><button data-action="enable-native">Включить новый</button><button data-action="cutover" class="primary">Переключить со старого</button><button data-action="legacy-rollback">Вернуть старый</button><button data-action="update">Обновить</button><button data-action="binary-rollback">Откатить бинарник</button></div></section>
 <section class="card"><div class="top"><h2>Журнал</h2><button id="logsBtn">Обновить</button></div><pre id="logs"></pre></section></div>
 <script>
-let csrf='';const q=s=>document.querySelector(s);async function api(path,options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const j=await r.json();if(!r.ok)throw new Error(j.error||'request_failed');return j}async function session(){const s=await api('/api/session');if(s.authenticated){csrf=s.csrf;q('#login').classList.add('hidden');q('#app').classList.remove('hidden');q('#logout').classList.remove('hidden');await refresh()}}async function refresh(){const j=await api('/api/status');q('#health').textContent=j.ok?'Туннель готов':'Требуется внимание';q('#health').className=j.ok?'ok':'bad';q('#status').textContent=JSON.stringify(j,null,2)}q('#loginBtn').onclick=async()=>{try{const j=await api('/api/login',{method:'POST',body:JSON.stringify({username:q('#user').value,password:q('#pass').value})});csrf=j.csrf;q('#pass').value='';await session()}catch(e){q('#loginMsg').textContent=e.message}};q('#refresh').onclick=refresh;q('#logsBtn').onclick=async()=>{const j=await api('/api/logs');q('#logs').textContent=j.output};document.querySelectorAll('[data-action]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{const j=await api('/api/action',{method:'POST',body:JSON.stringify({csrf,action:b.dataset.action})});q('#status').textContent=j.output;await refresh()}catch(e){q('#status').textContent=e.message}finally{b.disabled=false}});q('#importBtn').onclick=async()=>{try{const j=await api('/api/import-uri',{method:'POST',body:JSON.stringify({csrf,uri:q('#uri').value})});q('#uri').value='';q('#importMsg').textContent=j.output||'Применено';await refresh()}catch(e){q('#importMsg').textContent=e.message}};q('#logout').onclick=async()=>{await api('/api/logout',{method:'POST',body:JSON.stringify({csrf})});location.reload()};session();
+let csrf='';const q=s=>document.querySelector(s);async function api(path,options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const j=await r.json();if(!r.ok)throw new Error(j.error||'request_failed');return j}async function session(){const s=await api('/api/session');if(s.authenticated){csrf=s.csrf;q('#login').classList.add('hidden');q('#app').classList.remove('hidden');q('#logout').classList.remove('hidden');await refresh()}}async function refresh(){const j=await api('/api/status');q('#health').textContent=j.ok?'Туннель готов':'Требуется внимание';q('#health').className=j.ok?'ok':'bad';q('#status').textContent=JSON.stringify(j,null,2)}async function loadProfile(){try{const j=await api('/api/profile');if(!j.ok||!j.profile)throw new Error(j.output||'Сначала импортируйте URI');q('#provider').value=j.profile.provider;q('#transport').value=j.profile.transport;q('#room').value=j.profile.room;q('#profileMsg').textContent='Загружено'}catch(e){q('#profileMsg').textContent=e.message}}q('#loginBtn').onclick=async()=>{try{const j=await api('/api/login',{method:'POST',body:JSON.stringify({username:q('#user').value,password:q('#pass').value})});csrf=j.csrf;q('#pass').value='';await session()}catch(e){q('#loginMsg').textContent=e.message}};q('#refresh').onclick=refresh;q('#logsBtn').onclick=async()=>{const j=await api('/api/logs');q('#logs').textContent=j.output};document.querySelectorAll('[data-action]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{const j=await api('/api/action',{method:'POST',body:JSON.stringify({csrf,action:b.dataset.action})});q('#status').textContent=j.output;await refresh()}catch(e){q('#status').textContent=e.message}finally{b.disabled=false}});q('#importBtn').onclick=async()=>{try{const j=await api('/api/import-uri',{method:'POST',body:JSON.stringify({csrf,uri:q('#uri').value})});q('#uri').value='';q('#importMsg').textContent=j.output||'Применено';await loadProfile();await refresh()}catch(e){q('#importMsg').textContent=e.message}};q('#loadProfile').onclick=loadProfile;q('#saveProfile').onclick=async()=>{try{const current=await api('/api/profile');const selected=q('#transport').value;const parameters=current.profile&&current.profile.transport===selected&&current.profile.parameters?current.profile.parameters:{};const profile={provider:q('#provider').value,transport:selected,room:q('#room').value,parameters};const j=await api('/api/settings',{method:'POST',body:JSON.stringify({csrf,profile})});q('#profileMsg').textContent=j.output||'Сохранено'}catch(e){q('#profileMsg').textContent=e.message}};q('#logout').onclick=async()=>{await api('/api/logout',{method:'POST',body:JSON.stringify({csrf})});location.reload()};session();
 </script></main></body></html>"""
 
 

@@ -11,7 +11,7 @@ output=$1
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 output_dir=$(dirname -- "$output")
 
-for name in install-server.sh uninstall-server.sh olcrtc-server@.service server.example.yaml README.ru.md; do
+for name in install-server.sh uninstall-server.sh olcrtc-admin.py olcrtc-native-admin.service olcrtc-native@.service server.example.yaml README.ru.md; do
     if [ ! -f "$script_dir/$name" ] || [ -L "$script_dir/$name" ]; then
         echo "required regular file is missing: $script_dir/$name" >&2
         exit 1
@@ -31,7 +31,9 @@ tar \
     README.ru.md \
     build-bundle.sh \
     install-server.sh \
-    olcrtc-server@.service \
+    olcrtc-admin.py \
+    olcrtc-native-admin.service \
+    olcrtc-native@.service \
     server.example.yaml \
     uninstall-server.sh
 

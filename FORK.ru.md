@@ -7,6 +7,7 @@
 - [Debian 12 VPS](packaging/debian/README.ru.md)
 - [Keenetic Entware ARM64](packaging/keenetic/README.ru.md)
 - [Веб-панель Keenetic](web/keenetic/README.ru.md)
+- [Контракт панелей VPS и Keenetic](docs/WEBUI.ru.md)
 - [Синхронизация с официальным upstream и релизы](docs/UPSTREAM.ru.md)
 - [Матрица ошибок и план проверки](docs/TESTPLAN.ru.md)
 

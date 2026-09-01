@@ -3,12 +3,14 @@
 set -eu
 
 PURGE=0
-LIB_DIR=/usr/local/lib/olcrtc
-CONFIG_DIR=/etc/olcrtc
-STATE_DIR=/var/lib/olcrtc
-UNIT_PATH=/etc/systemd/system/olcrtc-server@.service
-UNINSTALL_PATH=/usr/local/sbin/olcrtc-uninstall-server
-BIN_LINK=/usr/local/bin/olcrtc
+LIB_DIR=/usr/local/lib/olcrtc-native
+CONFIG_DIR=/etc/olcrtc-native
+STATE_DIR=/var/lib/olcrtc-native
+UNIT_PATH=/etc/systemd/system/olcrtc-native@.service
+ADMIN_UNIT_PATH=/etc/systemd/system/olcrtc-native-admin.service
+UNINSTALL_PATH=/usr/local/sbin/olcrtc-native-uninstall-server
+INSTALL_PATH=/usr/local/sbin/olcrtc-native-install-server
+BIN_LINK=/usr/local/bin/olcrtc-native
 
 # ai-generated
 usage() {
@@ -16,13 +18,13 @@ usage() {
 Usage: uninstall-server.sh [--purge]
 
 Without --purge, configs, state and the olcrtc service account are preserved.
-With --purge, /etc/olcrtc, /var/lib/olcrtc and the service account are removed.
+With --purge, /etc/olcrtc-native, /var/lib/olcrtc-native and the service account are removed.
 EOF
 }
 
 # ai-generated
 die() {
-    printf 'olcrtc-server-uninstaller: error: %s\n' "$*" >&2
+    printf 'olcrtc-native-uninstaller: error: %s\n' "$*" >&2
     exit 1
 }
 
@@ -38,14 +40,18 @@ done
 [ "$(id -u)" -eq 0 ] || die "run as root"
 
 if command -v systemctl >/dev/null 2>&1; then
-    units=$(systemctl list-unit-files --type=service --no-legend 'olcrtc-server@*.service' 2>/dev/null |
+    units=$(systemctl list-unit-files --type=service --no-legend 'olcrtc-native@*.service' 2>/dev/null |
         awk '{print $1}')
     for unit in $units; do
         systemctl disable --now "$unit" >/dev/null 2>&1 || true
     done
 fi
 
-rm -f -- "$UNIT_PATH" "$BIN_LINK"
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now olcrtc-native-admin.service >/dev/null 2>&1 || true
+fi
+
+rm -f -- "$UNIT_PATH" "$ADMIN_UNIT_PATH" "$BIN_LINK"
 rm -rf -- "$LIB_DIR"
 
 if command -v systemctl >/dev/null 2>&1; then
@@ -55,15 +61,15 @@ fi
 
 if [ "$PURGE" -eq 1 ]; then
     rm -rf -- "$CONFIG_DIR" "$STATE_DIR"
-    if command -v userdel >/dev/null 2>&1 && getent passwd olcrtc >/dev/null 2>&1; then
-        userdel olcrtc >/dev/null 2>&1 || true
+    if command -v userdel >/dev/null 2>&1 && getent passwd olcrtc-native >/dev/null 2>&1; then
+        userdel olcrtc-native >/dev/null 2>&1 || true
     fi
-    if command -v groupdel >/dev/null 2>&1 && getent group olcrtc >/dev/null 2>&1; then
-        groupdel olcrtc >/dev/null 2>&1 || true
+    if command -v groupdel >/dev/null 2>&1 && getent group olcrtc-native >/dev/null 2>&1; then
+        groupdel olcrtc-native >/dev/null 2>&1 || true
     fi
     printf '%s\n' 'olcrtc server, configs and state were removed'
 else
-    printf '%s\n' 'olcrtc server was removed; /etc/olcrtc and /var/lib/olcrtc were preserved'
+    printf '%s\n' 'olcrtc native server was removed; /etc/olcrtc-native and /var/lib/olcrtc-native were preserved'
 fi
 
-rm -f -- "$UNINSTALL_PATH"
+rm -f -- "$UNINSTALL_PATH" "$INSTALL_PATH"

@@ -39,9 +39,14 @@ class RedactionTests(unittest.TestCase):
     # ai-generated: redact URI and YAML secrets.
     def test_redacts_hex_and_yaml(self) -> None:
         secret = "a" * 64
-        output = APP.redact(f"uri #{secret}$label\nkey: {secret}\npassword: value")
+        output = APP.redact(
+            f'uri #{secret}$label\nkey: {secret}\npassword: value\n'
+            'OLCRTC_ADMIN_TOKEN=manager-token\n{"token":"json-token"}'
+        )
         self.assertNotIn(secret, output)
         self.assertNotIn("value", output)
+        self.assertNotIn("manager-token", output)
+        self.assertNotIn("json-token", output)
         self.assertIn("[redacted-64hex]", output)
 
 
@@ -65,6 +70,38 @@ class SettingsTests(unittest.TestCase):
             path = Path(directory, "web.json")
             path.write_text(
                 '{"bind":"192.0.2.1","port":8091,"allow_lan":false,"username":"admin","password_hash":"x"}',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                APP.load_settings(path)
+
+    # ai-generated: reject accidental public WAN listeners even with LAN permission.
+    def test_public_bind_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "web.json")
+            path.write_text(
+                '{"bind":"8.8.8.8","port":8091,"allow_lan":true,"username":"admin","password_hash":"x"}',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                APP.load_settings(path)
+
+    # ai-generated: accept an explicit RFC1918 listener for the router LAN.
+    def test_private_lan_bind_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "web.json")
+            path.write_text(
+                '{"bind":"192.168.9.1","port":8091,"allow_lan":true,"username":"admin","password_hash":"x"}',
+                encoding="utf-8",
+            )
+            self.assertEqual(APP.load_settings(path).bind, "192.168.9.1")
+
+    # ai-generated: reject string booleans that could silently enable LAN access.
+    def test_allow_lan_requires_json_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "web.json")
+            path.write_text(
+                '{"bind":"192.168.9.1","port":8091,"allow_lan":"false","username":"admin","password_hash":"x"}',
                 encoding="utf-8",
             )
             with self.assertRaises(ValueError):

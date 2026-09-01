@@ -114,6 +114,38 @@ class UriTests(unittest.TestCase):
             self.assertNotIn("c" * 64, rendered)
             self.assertEqual(len(list(Path(directory).glob("secret-*.key"))), 1)
 
+    # ai-generated: preserve a non-secret profile and rebuild YAML with the existing key.
+    def test_managed_profile_update(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "client.yaml")
+            profile = Path(directory, "profile.json")
+            connection = URI.parse_uri(
+                f"olcrtc://jitsi?datachannel@https://meet.example.org/room#{'d' * 64}"
+            )
+            URI.write_managed_config(config, profile, connection)
+            self.assertEqual(URI.load_profile(profile)["provider"], "jitsi")
+            settings = {
+                "provider": "jitsi",
+                "transport": "vp8channel",
+                "room": "https://meet.example.org/changed-room",
+                "parameters": {"vp8-fps": "30", "vp8-batch": "64"},
+            }
+            updated = URI.connection_from_settings(settings, URI.read_current_key(config))
+            URI.write_managed_config(config, profile, updated)
+            self.assertIn("transport: vp8channel", config.read_text(encoding="utf-8"))
+            self.assertEqual(URI.load_profile(profile)["room"], settings["room"])
+
+    # ai-generated: reject settings that retain parameters from another transport.
+    def test_managed_profile_rejects_unknown_parameters(self) -> None:
+        settings = {
+            "provider": "jitsi",
+            "transport": "datachannel",
+            "room": "https://meet.example.org/room-name",
+            "parameters": {"vp8-fps": "30"},
+        }
+        with self.assertRaisesRegex(ValueError, "unsupported datachannel parameter"):
+            URI.connection_from_settings(settings, "a" * 64)
+
 
 if __name__ == "__main__":
     unittest.main()

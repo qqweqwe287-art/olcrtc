@@ -53,15 +53,32 @@ rm -f /opt/tmp/spec-uri.txt
 - сквозной SOCKS5-тест;
 - импорт нового Spec URI;
 - журнал с удалением распространённых форм секретов.
+- изменение основных provider, transport и room без показа ключа;
+- безопасное переключение со старой службы и обратный rollback;
+- проверка обновления и возврат предыдущего бинарника.
 
 Панель работает от `root`, потому что управляет init-службой. Она принимает только фиксированный набор команд без shell, проверяет пароль, сессию, CSRF и Origin. Не публикуйте порт панели в интернет.
+
+## Совместное существование и миграция
+
+Новый клиент использует `/opt/etc/init.d/S96olcrtc-native`. Установщик не заменяет старый `/opt/etc/init.d/S98olcrtc-client` и не запускает новый процесс поверх занятого SOCKS-порта. После импорта URI выберите в панели «Переключить со старого» или выполните:
+
+```sh
+/opt/lib/olcrtc-keenetic/migration.sh cutover
+```
+
+Если сквозная проверка не пройдёт, старая служба запускается обратно. Явный возврат после успешного переключения:
+
+```sh
+/opt/lib/olcrtc-keenetic/migration.sh rollback
+```
 
 ## Проверка
 
 Подождите до 30 секунд:
 
 ```sh
-/opt/etc/init.d/S98olcrtc-client status
+/opt/etc/init.d/S96olcrtc-native status
 /opt/lib/olcrtc-keenetic/doctor.sh --quick
 curl --socks5-hostname 127.0.0.1:8808 https://icanhazip.com
 ```
@@ -69,7 +86,7 @@ curl --socks5-hostname 127.0.0.1:8808 https://icanhazip.com
 Третий вызов должен вернуть публичный IP VPS. Если порт не слушает:
 
 ```sh
-/opt/etc/init.d/S98olcrtc-client log 120
+/opt/etc/init.d/S96olcrtc-native log 120
 /opt/lib/olcrtc-keenetic/doctor.sh
 ```
 
@@ -96,10 +113,10 @@ curl --socks5-hostname 127.0.0.1:8808 https://icanhazip.com
 ## Ручное управление
 
 ```sh
-/opt/etc/init.d/S98olcrtc-client start
-/opt/etc/init.d/S98olcrtc-client stop
-/opt/etc/init.d/S98olcrtc-client restart
-/opt/etc/init.d/S98olcrtc-client status
+/opt/etc/init.d/S96olcrtc-native start
+/opt/etc/init.d/S96olcrtc-native stop
+/opt/etc/init.d/S96olcrtc-native restart
+/opt/etc/init.d/S96olcrtc-native status
 /opt/etc/init.d/S97olcrtc-web status
 ```
 
@@ -107,7 +124,7 @@ curl --socks5-hostname 127.0.0.1:8808 https://icanhazip.com
 
 ```sh
 /opt/lib/olcrtc-keenetic/import-uri.sh
-/opt/etc/init.d/S98olcrtc-client restart
+/opt/etc/init.d/S96olcrtc-native restart
 ```
 
 ## Удаление

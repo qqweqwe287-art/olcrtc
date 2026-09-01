@@ -89,11 +89,15 @@ jobs:
       - name: Check fork packaging
         run: |
           find packaging -type f -name '*.sh' -print0 | xargs -0 shellcheck -s sh
-          shellcheck -s sh packaging/keenetic/S97olcrtc-web packaging/keenetic/S98olcrtc-client
+          shellcheck -s sh packaging/keenetic/S96olcrtc-native packaging/keenetic/S97olcrtc-web packaging/keenetic/migration.sh packaging/keenetic/rollback.sh
           sh packaging/release/test-assemble-assets.sh
           sh packaging/debian/test-install-server.sh
-          python3 packaging/keenetic/test_parsers.py
-          python3 web/keenetic/test_app.py
+          python3 -m unittest discover -s packaging/keenetic -p 'test*.py' -v
+          python3 -m unittest discover -s packaging/debian -p 'test*.py' -v
+          python3 -m unittest discover -s web/keenetic -p 'test*.py' -v
+          if [ -d web/debian ]; then
+            python3 -m unittest discover -s web/debian -p 'test*.py' -v
+          fi
 
       - name: Run real provider E2E
         if: ${{ inputs.run_real_e2e }}

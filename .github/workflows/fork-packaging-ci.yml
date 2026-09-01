@@ -37,13 +37,21 @@ jobs:
       - name: ShellCheck
         run: |
           find packaging -type f -name '*.sh' -print0 | xargs -0 shellcheck -s sh
-          shellcheck -s sh packaging/keenetic/S97olcrtc-web packaging/keenetic/S98olcrtc-client
+          shellcheck -s sh packaging/keenetic/S96olcrtc-native packaging/keenetic/S97olcrtc-web packaging/keenetic/migration.sh packaging/keenetic/rollback.sh
 
       - name: Test release assembly with dash
         run: sh packaging/release/test-assemble-assets.sh
 
       - name: Test Debian installer regressions with dash
         run: sh packaging/debian/test-install-server.sh
+
+      - name: Build both platform bundles
+        run: |
+          mkdir -p build/bundles
+          sh packaging/debian/build-bundle.sh build/bundles/olcrtc-debian-amd64.tar.gz
+          sh packaging/keenetic/build-bundle.sh build/bundles/olcrtc-keenetic-arm64.tar.gz
+          tar -tzf build/bundles/olcrtc-debian-amd64.tar.gz
+          tar -tzf build/bundles/olcrtc-keenetic-arm64.tar.gz
 
       - name: Test release assembly with BusyBox ash
         run: >-
@@ -55,5 +63,9 @@ jobs:
 
       - name: Test strict Python helpers and web UI
         run: |
-          python3 packaging/keenetic/test_parsers.py
-          python3 web/keenetic/test_app.py
+          python3 -m unittest discover -s packaging/keenetic -p 'test*.py' -v
+          python3 -m unittest discover -s packaging/debian -p 'test*.py' -v
+          python3 -m unittest discover -s web/keenetic -p 'test*.py' -v
+          if [ -d web/debian ]; then
+            python3 -m unittest discover -s web/debian -p 'test*.py' -v
+          fi
