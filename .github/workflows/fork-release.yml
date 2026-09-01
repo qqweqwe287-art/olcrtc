@@ -91,6 +91,7 @@ jobs:
           find packaging -type f -name '*.sh' -print0 | xargs -0 shellcheck -s sh
           shellcheck -s sh packaging/keenetic/S97olcrtc-web packaging/keenetic/S98olcrtc-client
           sh packaging/release/test-assemble-assets.sh
+          sh packaging/debian/test-install-server.sh
           python3 packaging/keenetic/test_parsers.py
           python3 web/keenetic/test_app.py
 

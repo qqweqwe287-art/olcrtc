@@ -408,7 +408,9 @@ install_config() {
     chmod 0750 "$CONFIG_DIR"
     install -o root -g olcrtc -m 0640 "$BUNDLE_DIR/server.example.yaml" "$CONFIG_DIR/server.example.yaml"
 
-    [ -n "$CONFIG_SOURCE" ] || return
+    if [ -z "$CONFIG_SOURCE" ]; then
+        return 0
+    fi
     if [ ! -f "$CONFIG_SOURCE" ] || [ -L "$CONFIG_SOURCE" ]; then
         die "config is not a regular file: $CONFIG_SOURCE"
     fi

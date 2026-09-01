@@ -42,6 +42,9 @@ jobs:
       - name: Test release assembly with dash
         run: sh packaging/release/test-assemble-assets.sh
 
+      - name: Test Debian installer regressions with dash
+        run: sh packaging/debian/test-install-server.sh
+
       - name: Test release assembly with BusyBox ash
         run: >-
           docker run --rm
