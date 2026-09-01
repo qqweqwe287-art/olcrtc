@@ -1,0 +1,81 @@
+#!/bin/sh
+# ai-generated: Entware init service for the olcRTC client supervisor.
+
+# shellcheck disable=SC1091 # runtime path exists only after bundle installation.
+. /opt/lib/olcrtc-keenetic/lib/common.sh
+
+# ai-generated: wait for one PID file to stop, then apply a bounded kill fallback.
+stop_pid_file() {
+    pid_file=$1
+    marker=$2
+    if ! olc_pid_alive "$pid_file" "$marker"; then
+        rm -f "$pid_file"
+        return 0
+    fi
+    pid=$(sed -n '1p' "$pid_file")
+    kill -TERM "$pid" 2>/dev/null || true
+    count=0
+    while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 10 ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pid_file"
+}
+
+case "${1:-start}" in
+    start)
+        [ -x "$OLCRTC_BIN" ] || olc_die "client binary is missing"
+        [ -s "$OLCRTC_CONFIG" ] || olc_die "client configuration is missing"
+        if olc_pid_alive "$OLCRTC_RUNNER_PID" "run-client.sh"; then
+            olc_log "client supervisor is already running"
+            exit 0
+        fi
+        rm -f "$OLCRTC_RUNNER_PID" "$OLCRTC_CHILD_PID" "$OLCRTC_BLOCKED"
+        olc_make_directories
+        olc_secure_permissions
+        start-stop-daemon -S -q -b -m -p "$OLCRTC_RUNNER_PID" \
+            -x "$OLCRTC_LIB/run-client.sh" -c "$OLCRTC_RUN_USER" \
+            || olc_die "failed to start client supervisor"
+        sleep 1
+        olc_pid_alive "$OLCRTC_RUNNER_PID" "run-client.sh" \
+            || olc_die "client supervisor exited during startup"
+        olc_log "client supervisor started"
+        ;;
+    stop)
+        stop_pid_file "$OLCRTC_RUNNER_PID" "run-client.sh"
+        stop_pid_file "$OLCRTC_CHILD_PID" "$OLCRTC_BIN"
+        rm -f "$OLCRTC_BLOCKED"
+        olc_log "client stopped"
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    status)
+        if [ -s "$OLCRTC_BLOCKED" ]; then
+            printf 'blocked: %s\n' "$(sed -n '1p' "$OLCRTC_BLOCKED")"
+            exit 1
+        fi
+        if ! olc_pid_alive "$OLCRTC_RUNNER_PID" "run-client.sh"; then
+            printf '%s\n' "stopped"
+            exit 1
+        fi
+        if olc_pid_alive "$OLCRTC_CHILD_PID" "$OLCRTC_BIN"; then
+            printf 'running: supervisor=%s child=%s\n' \
+                "$(sed -n '1p' "$OLCRTC_RUNNER_PID")" "$(sed -n '1p' "$OLCRTC_CHILD_PID")"
+            exit 0
+        fi
+        printf '%s\n' "starting or waiting for restart: supervisor is alive, child is not ready"
+        exit 2
+        ;;
+    log)
+        tail -n "${2:-80}" "$OLCRTC_CLIENT_LOG" 2>/dev/null || true
+        ;;
+    *)
+        printf '%s\n' "usage: $0 {start|stop|restart|status|log [lines]}" >&2
+        exit 2
+        ;;
+esac

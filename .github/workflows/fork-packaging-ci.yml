@@ -1,0 +1,56 @@
+# ai-generated: CI checks for fork-owned packaging and release metadata.
+name: Fork packaging CI
+
+on:
+  push:
+    paths:
+      - "packaging/**"
+      - "web/**"
+      - "FORK.ru.md"
+      - "docs/UPSTREAM.ru.md"
+      - "docs/TESTPLAN.ru.md"
+      - ".github/workflows/fork-*.yml"
+      - ".github/workflows/upstream-sync.yml"
+  pull_request:
+    branches: ["main", "master"]
+    paths:
+      - "packaging/**"
+      - "web/**"
+      - "FORK.ru.md"
+      - "docs/UPSTREAM.ru.md"
+      - "docs/TESTPLAN.ru.md"
+      - ".github/workflows/fork-*.yml"
+      - ".github/workflows/upstream-sync.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    name: POSIX shell and release manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck
+        run: |
+          find packaging -type f -name '*.sh' -print0 | xargs -0 shellcheck -s sh
+          shellcheck -s sh packaging/keenetic/S97olcrtc-web packaging/keenetic/S98olcrtc-client
+
+      - name: Test release assembly with dash
+        run: sh packaging/release/test-assemble-assets.sh
+
+      - name: Test release assembly with BusyBox ash
+        run: >-
+          docker run --rm
+          -v "$PWD:/src:ro"
+          -w /src
+          alpine:3.23
+          sh packaging/release/test-assemble-assets.sh
+
+      - name: Test strict Python helpers and web UI
+        run: |
+          python3 packaging/keenetic/test_parsers.py
+          python3 web/keenetic/test_app.py

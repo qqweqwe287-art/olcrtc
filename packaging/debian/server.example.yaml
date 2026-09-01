@@ -1,0 +1,22 @@
+# ai-generated: safe placeholder for one Debian server instance.
+# Copy this file to /etc/olcrtc/main.yaml and replace every placeholder.
+# Keep the client and server on the same release from manifest.tsv.
+mode: srv
+auth:
+  provider: jitsi
+room:
+  # Use a complete and reachable Jitsi URL. The value "any" is invalid.
+  id: "https://REPLACE_ME_WITH_HOST/REPLACE_ME_WITH_ROOM"
+crypto:
+  # The path is relative to this YAML file.
+  key_file: ./main.key
+net:
+  transport: datachannel
+  dns: "8.8.8.8:53"
+liveness:
+  interval: 10s
+  timeout: 15s
+  failures: 4
+lifecycle:
+  max_session_duration: 6h
+debug: false

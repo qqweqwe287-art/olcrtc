@@ -1,0 +1,15 @@
+# Fields are separated by one TAB character. This is documentation only.
+# ai-generated: non-secret example of the strict release manifest schema.
+manifest_version	1
+version	keenetic-v0.1.0+upstream.0123456
+wire	OLC2-OLVC5
+config_schema	1
+source_repository	qqweqwe287-art/olcrtc
+source_commit	0123456789abcdef0123456789abcdef01234567
+upstream_repository	openlibrecommunity/olcrtc
+upstream_commit	89abcdef0123456789abcdef0123456789abcdef
+go_version	go1.26.3
+asset	core	linux	amd64	olcrtc-linux-amd64	12345678	0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+asset	core	linux	arm64	olcrtc-linux-arm64	12345678	89abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567
+asset	bundle	linux	amd64	olcrtc-debian-amd64.tar.gz	12345	fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+asset	bundle	linux	arm64	olcrtc-keenetic-arm64.tar.gz	12345	76543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba98

@@ -1,0 +1,21 @@
+# ai-generated: safe placeholder client configuration for Keenetic Entware.
+mode: cnc
+auth:
+  provider: jitsi
+room:
+  id: "https://meet.example.org/REPLACE_WITH_ROOM_NAME"
+crypto:
+  key_file: "./REPLACE_WITH_SECRET_FILE.key"
+net:
+  transport: datachannel
+  dns: "8.8.8.8:53"
+socks:
+  host: "127.0.0.1"
+  port: 8808
+liveness:
+  interval: 10s
+  timeout: 15s
+  failures: 4
+lifecycle:
+  max_session_duration: 6h
+debug: false

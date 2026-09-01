@@ -1,0 +1,189 @@
+# ai-generated: manual, gated release for Linux server and Keenetic artifacts.
+name: Fork release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the GitHub release as a prerelease"
+        required: true
+        default: true
+        type: boolean
+      run_real_e2e:
+        description: "Run real provider E2E before building"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+env:
+  GOLANGCI_LINT_VERSION: v2.12.2
+  MAGE_VERSION: v1.17.2
+
+jobs:
+  quality:
+    name: Quality gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Require default branch HEAD
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$DEFAULT_BRANCH")" || {
+            echo "release must run from the current default branch HEAD" >&2
+            exit 1
+          }
+
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$' || {
+            echo "invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          }
+
+      - name: Verify recorded official upstream
+        run: |
+          upstream_sha=$(tr -d '\r\n' <packaging/release/UPSTREAM_COMMIT)
+          printf '%s\n' "$upstream_sha" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "invalid recorded upstream commit" >&2
+            exit 1
+          }
+          git cat-file -e "$upstream_sha^{commit}"
+          git merge-base --is-ancestor "$upstream_sha" HEAD || {
+            echo "recorded upstream commit is not an ancestor of release HEAD" >&2
+            exit 1
+          }
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install pinned build tools
+        run: |
+          go install "github.com/magefile/mage@$MAGE_VERSION"
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
+
+      - name: Run upstream quality pipeline
+        run: mage check
+
+      - name: Check fork packaging
+        run: |
+          find packaging -type f -name '*.sh' -print0 | xargs -0 shellcheck -s sh
+          shellcheck -s sh packaging/keenetic/S97olcrtc-web packaging/keenetic/S98olcrtc-client
+          sh packaging/release/test-assemble-assets.sh
+          python3 packaging/keenetic/test_parsers.py
+          python3 web/keenetic/test_app.py
+
+      - name: Run real provider E2E
+        if: ${{ inputs.run_real_e2e }}
+        run: mage e2e
+
+  build:
+    name: Build one-SHA release
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install pinned Mage
+        run: go install "github.com/magefile/mage@v1.17.2"
+
+      - name: Cross-build from one checkout
+        run: mage cross
+
+      - name: Build platform bundles
+        run: |
+          mkdir -p build/bundles
+          sh packaging/debian/build-bundle.sh build/bundles/olcrtc-debian-amd64.tar.gz
+          sh packaging/keenetic/build-bundle.sh build/bundles/olcrtc-keenetic-arm64.tar.gz
+
+      - name: Assemble manifest and checksums
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          GO_VERSION=$(go env GOVERSION)
+          export GO_VERSION
+          sh packaging/release/assemble-assets.sh build build/bundles dist "$RELEASE_TAG"
+
+      - name: Upload immutable release input
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: dist
+
+      - name: Verify downloaded release input
+        run: (cd dist && sha256sum -c SHA256SUMS)
+
+      - name: Publish manual release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          # shellcheck disable=SC2016 # Markdown code spans are intentional literals.
+          printf 'Source commit: `%s`\n\nBoth Linux binaries were built from this exact commit. Verify `manifest.tsv` and `SHA256SUMS` before installation.\n' \
+            "$GITHUB_SHA" >release-notes.md
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release create "$RELEASE_TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --notes-file release-notes.md \
+              --prerelease
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --notes-file release-notes.md
+          fi

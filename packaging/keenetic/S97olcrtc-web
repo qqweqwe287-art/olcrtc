@@ -1,0 +1,64 @@
+#!/bin/sh
+# ai-generated: LAN-only Entware init service for the authenticated web UI.
+
+# shellcheck disable=SC1091 # runtime path exists only after bundle installation.
+. /opt/lib/olcrtc-keenetic/lib/common.sh
+
+# ai-generated: stop the web process with a bounded graceful shutdown.
+stop_web() {
+    if ! olc_pid_alive "$OLCRTC_WEB_PID" "web-app.py"; then
+        rm -f "$OLCRTC_WEB_PID"
+        return 0
+    fi
+    pid=$(sed -n '1p' "$OLCRTC_WEB_PID")
+    kill -TERM "$pid" 2>/dev/null || true
+    count=0
+    while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 10 ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    rm -f "$OLCRTC_WEB_PID"
+}
+
+case "${1:-start}" in
+    start)
+        [ -s "$OLCRTC_WEB_CONFIG" ] || olc_die "web configuration is missing"
+        [ -x "$OLCRTC_LIB/web-app.py" ] || olc_die "web application is missing"
+        if olc_pid_alive "$OLCRTC_WEB_PID" "web-app.py"; then
+            olc_log "web UI is already running"
+            exit 0
+        fi
+        olc_make_directories
+        olc_rotate_log "$OLCRTC_WEB_LOG"
+        start-stop-daemon -S -q -b -m -p "$OLCRTC_WEB_PID" -x /opt/bin/python3 -- \
+            "$OLCRTC_LIB/web-app.py" --config "$OLCRTC_WEB_CONFIG" run \
+            >>"$OLCRTC_WEB_LOG" 2>&1 || olc_die "failed to start web UI"
+        sleep 1
+        olc_pid_alive "$OLCRTC_WEB_PID" "web-app.py" || olc_die "web UI exited during startup"
+        olc_log "web UI started"
+        ;;
+    stop)
+        stop_web
+        olc_log "web UI stopped"
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    status)
+        if olc_pid_alive "$OLCRTC_WEB_PID" "web-app.py"; then
+            printf 'running: pid=%s\n' "$(sed -n '1p' "$OLCRTC_WEB_PID")"
+            exit 0
+        fi
+        printf '%s\n' "stopped"
+        exit 1
+        ;;
+    log)
+        tail -n "${2:-80}" "$OLCRTC_WEB_LOG" 2>/dev/null || true
+        ;;
+    *)
+        printf '%s\n' "usage: $0 {start|stop|restart|status|log [lines]}" >&2
+        exit 2
+        ;;
+esac

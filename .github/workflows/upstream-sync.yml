@@ -1,0 +1,158 @@
+# ai-generated: manual upstream sync proposal that never releases or updates the default branch directly.
+name: Propose upstream sync
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: openlibrecommunity/olcrtc
+  UPSTREAM_BRANCH: master
+
+jobs:
+  propose:
+    name: Test and open sync pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install pinned Mage
+        run: go install github.com/magefile/mage@v1.17.2
+
+      - name: Fetch official upstream
+        id: upstream
+        run: |
+          git remote add upstream "https://github.com/$UPSTREAM_REPOSITORY.git"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+          upstream_sha=$(git rev-parse "upstream/$UPSTREAM_BRANCH")
+          printf 'sha=%s\n' "$upstream_sha" >>"$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$upstream_sha" HEAD; then
+            printf 'needed=false\n' >>"$GITHUB_OUTPUT"
+            echo "fork already contains upstream $upstream_sha"
+          else
+            printf 'needed=true\n' >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream into an isolated branch
+        if: steps.upstream.outputs.needed == 'true'
+        env:
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          short_sha=$(printf '%s' "$UPSTREAM_SHA" | cut -c1-12)
+          branch="automation/upstream-$short_sha"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "proposal branch already exists: $branch" >&2
+            exit 1
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          git merge --no-commit --no-ff "upstream/$UPSTREAM_BRANCH"
+          printf '%s\n' "$UPSTREAM_SHA" >packaging/release/UPSTREAM_COMMIT
+          git add packaging/release/UPSTREAM_COMMIT
+          git commit -m "chore: sync upstream $short_sha"
+          printf 'SYNC_BRANCH=%s\n' "$branch" >>"$GITHUB_ENV"
+
+      - name: Test merged source
+        if: steps.upstream.outputs.needed == 'true'
+        run: |
+          go mod tidy -diff
+          mage test
+          sh packaging/release/test-assemble-assets.sh
+          python3 packaging/keenetic/test_parsers.py
+          python3 web/keenetic/test_app.py
+
+      - name: Push proposal branch
+        if: steps.upstream.outputs.needed == 'true'
+        run: git push origin "HEAD:refs/heads/$SYNC_BRANCH"
+
+      - name: Open pull request
+        if: steps.upstream.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          cat >upstream-sync-pr.md <<EOF
+          ## Что меняет PR
+
+          Синхронизирует ядро с официальным репозиторием $UPSTREAM_REPOSITORY.
+          Upstream commit: $UPSTREAM_SHA.
+
+          Слияние этого PR не создает релиз. Релиз требует отдельного ручного workflow.
+
+          ## Связанные issue
+
+          нет
+
+          ## Тип изменения
+
+          - [ ] fix - исправление бага
+          - [ ] feat - новая функциональность
+          - [ ] refactor - рефакторинг без изменения поведения
+          - [ ] perf - улучшение производительности
+          - [ ] docs - только документация
+          - [x] build / ci - сборка, CI, пакетирование
+          - [x] chore - прочее
+          - [ ] BREAKING CHANGE - ломает совместимость
+
+          ## Область
+
+          - [ ] auth
+          - [ ] transport / channel
+          - [ ] mux / control / liveness / lifecycle
+          - [ ] session / app
+          - [ ] config / CLI / URI / sub
+          - [ ] mobile
+          - [x] CI / mage
+          - [ ] docs / examples
+          - [x] другое: синхронизация официального upstream
+
+          ## Как тестировалось
+
+          - Provider: не применяется к автоматической проверке
+          - Transport: не применяется к автоматической проверке
+          - ОС: linux
+          - Сценарий: go mod tidy -diff, mage test, release manifest smoke test
+
+          ## Совместимость
+
+          - [ ] Конфиг совместим с предыдущей версией - требуется ручная проверка diff
+          - [ ] Wire-протокол совместим - требуется ручная проверка diff
+          - [ ] Публичный API не сломан - требуется ручная проверка diff
+
+          ## Чек-лист
+
+          - [ ] Локально прогнаны mage lint и mage test
+          - [x] Добавлены/обновлены тесты, где это имеет смысл
+          - [ ] Обновлена документация, если поведение или конфиг изменились
+          - [x] В коде нет добавленных этим workflow токенов и ключей
+          - [x] Изменения сохраняют лицензию репозитория
+
+          ## Дополнительно
+
+          Pull request создан ручным workflow. Полный fork CI должен завершиться до merge.
+          EOF
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base "$DEFAULT_BRANCH" \
+            --head "$SYNC_BRANCH" \
+            --title "chore: sync official upstream" \
+            --body-file upstream-sync-pr.md

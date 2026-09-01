@@ -1,0 +1,47 @@
+# ai-generated: hardened systemd template for olcRTC server instances.
+[Unit]
+Description=olcRTC server instance %i
+Documentation=https://github.com/qqweqwe287-art/olcrtc
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=olcrtc
+Group=olcrtc
+UMask=0027
+WorkingDirectory=/var/lib/olcrtc/%i
+StateDirectory=olcrtc/%i
+StateDirectoryMode=0750
+Environment=HOME=/var/lib/olcrtc/%i
+ExecStart=/usr/local/lib/olcrtc/current/olcrtc /etc/olcrtc/%i.yaml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+KillSignal=SIGTERM
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
