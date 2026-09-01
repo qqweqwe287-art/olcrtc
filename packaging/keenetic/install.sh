@@ -164,7 +164,9 @@ olc_secure_permissions
 set --
 [ -z "$manifest_file" ] || set -- "$@" --manifest-file "$manifest_file"
 [ -z "$manifest_url" ] || set -- "$@" --manifest-url "$manifest_url"
-[ "$no_start" = no ] && [ -f "$OLCRTC_ENABLED" ] || set -- "$@" --no-start
+if [ "$no_start" != no ] || [ ! -f "$OLCRTC_ENABLED" ]; then
+    set -- "$@" --no-start
+fi
 [ "$#" -gt 0 ] || olc_die "installer requires --manifest-file or --manifest-url"
 "$OLCRTC_LIB/upgrade.sh" "$@"
 

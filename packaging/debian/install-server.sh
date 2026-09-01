@@ -474,7 +474,9 @@ prepare_v011_migration() {
     legacy_config=/etc/olcrtc/$INSTANCE.yaml
     legacy_unit=/etc/systemd/system/olcrtc-server@.service
     [ -d "$legacy_lib" ] || die "v0.1.1 fork files were not found"
-    [ -f "$legacy_config" ] && [ ! -L "$legacy_config" ] || die "legacy config is not a regular file: $legacy_config"
+    if [ ! -f "$legacy_config" ] || [ -L "$legacy_config" ]; then
+        die "legacy config is not a regular file: $legacy_config"
+    fi
     [ -f "$legacy_unit" ] || die "legacy template was not found"
     grep -Fqx 'ExecStart=/usr/local/lib/olcrtc/current/olcrtc /etc/olcrtc/%i.yaml' "$legacy_unit" || \
         die "legacy template does not match the prior fork package; it may belong to Oleglog Manager"
