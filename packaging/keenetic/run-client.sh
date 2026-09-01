@@ -10,13 +10,13 @@ stopping=0
 child_pid=
 quick_failures=0
 
-# shellcheck disable=SC2329 # invoked by EXIT trap.
+# shellcheck disable=SC2317,SC2329 # invoked by EXIT trap.
 # ai-generated: remove only PID state owned by this supervisor.
 cleanup_runner() {
     rm -f "$OLCRTC_CHILD_PID"
 }
 
-# shellcheck disable=SC2329 # invoked by signal traps.
+# shellcheck disable=SC2317,SC2329 # invoked by signal traps.
 # ai-generated: forward termination to the real olcRTC child.
 stop_runner() {
     stopping=1

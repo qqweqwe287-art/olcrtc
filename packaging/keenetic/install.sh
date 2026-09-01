@@ -46,7 +46,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(id -u)" = "0" ] || early_die "run this command as root"
-[ -d /opt ] && [ -w /opt ] || early_die "Entware /opt is missing or read-only"
+if [ ! -d /opt ] || [ ! -w /opt ]; then
+    early_die "Entware /opt is missing or read-only"
+fi
 case "$(uname -m)" in
     aarch64|arm64) ;;
     *) early_die "this package requires ARM64, detected: $(uname -m)" ;;

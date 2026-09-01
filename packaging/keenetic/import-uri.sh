@@ -66,7 +66,9 @@ elif [ -z "$uri_file" ]; then
     uri_file=$temporary_uri
 fi
 
-[ -f "$uri_file" ] && [ -r "$uri_file" ] || olc_die "URI file is not readable"
+if [ ! -f "$uri_file" ] || [ ! -r "$uri_file" ]; then
+    olc_die "URI file is not readable"
+fi
 python3 "$OLCRTC_LIB/lib/uri_import.py" --uri-file "$uri_file" --config "$OLCRTC_CONFIG" \
     || olc_die "configuration was not changed"
 olc_secure_permissions

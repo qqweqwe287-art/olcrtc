@@ -375,7 +375,9 @@ extract_bundle() {
     tar -xzf "$BUNDLE_FILE" -C "$BUNDLE_DIR"
 
     for required in olcrtc-server@.service server.example.yaml uninstall-server.sh; do
-        [ -f "$BUNDLE_DIR/$required" ] && [ ! -L "$BUNDLE_DIR/$required" ] || die "invalid extracted file: $required"
+        if [ ! -f "$BUNDLE_DIR/$required" ] || [ -L "$BUNDLE_DIR/$required" ]; then
+            die "invalid extracted file: $required"
+        fi
     done
 }
 
@@ -407,7 +409,9 @@ install_config() {
     install -o root -g olcrtc -m 0640 "$BUNDLE_DIR/server.example.yaml" "$CONFIG_DIR/server.example.yaml"
 
     [ -n "$CONFIG_SOURCE" ] || return
-    [ -f "$CONFIG_SOURCE" ] && [ ! -L "$CONFIG_SOURCE" ] || die "config is not a regular file: $CONFIG_SOURCE"
+    if [ ! -f "$CONFIG_SOURCE" ] || [ -L "$CONFIG_SOURCE" ]; then
+        die "config is not a regular file: $CONFIG_SOURCE"
+    fi
     target=$CONFIG_DIR/$INSTANCE.yaml
     if [ -e "$target" ] && [ "$REPLACE_CONFIG" -ne 1 ]; then
         die "$target already exists; use --replace-config to replace it"
