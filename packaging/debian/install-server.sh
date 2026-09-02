@@ -11,6 +11,7 @@ CONFIG_SOURCE=
 REPLACE_CONFIG=0
 START_SERVICE=0
 MIGRATE_V011=0
+FRESH=0
 MANIFEST_PIN=${OLCRTC_MANIFEST_SHA256:-}
 
 LIB_DIR=/usr/local/lib/olcrtc-native
@@ -24,6 +25,10 @@ UNINSTALL_PATH=/usr/local/sbin/olcrtc-native-uninstall-server
 INSTALL_PATH=/usr/local/sbin/olcrtc-native-install-server
 BIN_LINK=/usr/local/bin/olcrtc-native
 TMP_DIR=
+FRESH_PREPARED=0
+FRESH_COMMITTED=0
+LEGACY_ACTIVE=
+LEGACY_BACKUP=
 
 # ai-generated
 say() {
@@ -50,6 +55,7 @@ Options:
   --replace-config      allow --config to replace an existing config
   --start               enable and start the selected instance
   --migrate-v0.1.1      explicitly migrate one prior fork instance after backup
+  --fresh               back up, replace and remove the old Manager after the new UI starts
   -h, --help            show this help
 
 Environment:
@@ -60,6 +66,12 @@ EOF
 
 # ai-generated
 cleanup() {
+    if [ "$FRESH_PREPARED" -eq 1 ] && [ "$FRESH_COMMITTED" -ne 1 ]; then
+        say "fresh install did not complete; restarting the previous Manager"
+        for unit in $LEGACY_ACTIVE; do
+            systemctl start "$unit" >/dev/null 2>&1 || true
+        done
+    fi
     if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
         rm -rf -- "$TMP_DIR"
     fi
@@ -130,6 +142,7 @@ parse_args() {
             --replace-config) REPLACE_CONFIG=1; shift ;;
             --start) START_SERVICE=1; shift ;;
             --migrate-v0.1.1) MIGRATE_V011=1; shift ;;
+            --fresh) FRESH=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) die "unknown option: $1" ;;
         esac
@@ -497,6 +510,83 @@ prepare_v011_migration() {
     say "prepared explicit v0.1.1 migration; backup: $backup"
 }
 
+# ai-generated: enumerate only paths owned by the previous Manager packages.
+legacy_paths() {
+    for path in \
+        /etc/systemd/system/olcrtc-server.service \
+        /etc/systemd/system/olcrtc-server@.service \
+        /etc/systemd/system/olcrtc-admin.service \
+        /usr/local/bin/olcrtc \
+        /usr/local/bin/olcrtc-admin \
+        /usr/local/bin/olcrtc-launcher \
+        /usr/local/lib/olcrtc \
+        /etc/olcrtc \
+        /var/lib/olcrtc
+    do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            printf '%s\n' "$path"
+        fi
+    done
+}
+
+# ai-generated: create a recoverable copy and release old ports immediately before cutover.
+prepare_fresh_switch() {
+    [ "$FRESH" -eq 1 ] || return 0
+    paths=$(legacy_paths)
+    if [ -z "$paths" ]; then
+        say "--fresh requested; no previous Manager files were found"
+        FRESH_PREPARED=1
+        return 0
+    fi
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    LEGACY_BACKUP=/var/backups/olcrtc-native/legacy-manager-$stamp
+    mkdir -p "$LEGACY_BACKUP/root"
+    chmod 0700 "$LEGACY_BACKUP" "$LEGACY_BACKUP/root"
+    : >"$LEGACY_BACKUP/paths.txt"
+    printf '%s\n' "$paths" | while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        cp -a --parents "$path" "$LEGACY_BACKUP/root"
+        printf '%s\n' "$path" >>"$LEGACY_BACKUP/paths.txt"
+    done
+    chmod 0600 "$LEGACY_BACKUP/paths.txt"
+    for unit in olcrtc-server.service olcrtc-admin.service; do
+        if systemctl is-active --quiet "$unit"; then
+            LEGACY_ACTIVE="$LEGACY_ACTIVE $unit"
+        fi
+        systemctl stop "$unit" >/dev/null 2>&1 || true
+    done
+    FRESH_PREPARED=1
+    say "previous Manager was backed up to $LEGACY_BACKUP"
+}
+
+# ai-generated: remove the exact backed-up legacy paths only after the new admin is healthy.
+commit_fresh_switch() {
+    [ "$FRESH" -eq 1 ] || return 0
+    [ "$FRESH_PREPARED" -eq 1 ] || die "fresh switch was not prepared"
+    if [ -n "$LEGACY_BACKUP" ] && [ -f "$LEGACY_BACKUP/paths.txt" ]; then
+        while IFS= read -r path; do
+            case "$path" in
+                /etc/systemd/system/olcrtc-server.service|\
+                /etc/systemd/system/olcrtc-server@.service|\
+                /etc/systemd/system/olcrtc-admin.service|\
+                /usr/local/bin/olcrtc|\
+                /usr/local/bin/olcrtc-admin|\
+                /usr/local/bin/olcrtc-launcher|\
+                /usr/local/lib/olcrtc|\
+                /etc/olcrtc|\
+                /var/lib/olcrtc)
+                    rm -rf -- "$path"
+                    ;;
+                *) die "unsafe path in legacy backup manifest: $path" ;;
+            esac
+        done <"$LEGACY_BACKUP/paths.txt"
+    fi
+    systemctl disable olcrtc-server.service olcrtc-admin.service >/dev/null 2>&1 || true
+    systemctl daemon-reload
+    FRESH_COMMITTED=1
+    say "old Manager files were removed; recovery copy: ${LEGACY_BACKUP:-not-needed}"
+}
+
 # ai-generated
 active_units() {
     systemctl list-units --type=service --state=active --no-legend 'olcrtc-native@*.service' 2>/dev/null |
@@ -645,7 +735,9 @@ install_config
 prepare_v011_migration
 install_admin_credentials
 install_admin_tls
+prepare_fresh_switch
 activate_release
+commit_fresh_switch
 
 say "installed release $RELEASE"
 say "example config: $CONFIG_DIR/server.example.yaml"
@@ -656,3 +748,4 @@ if [ "$START_SERVICE" -eq 1 ]; then
 else
     say "service was not started; configure $CONFIG_DIR/$INSTANCE.yaml first"
 fi
+

@@ -76,6 +76,29 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ADMIN.instance_name(value)
 
+    # ai-generated: preserve and restore only the two fixed files for an instance.
+    def test_backup_and_restore_instance(self) -> None:
+        original_config = ADMIN.CONFIG_DIR
+        original_backup = ADMIN.BACKUP_DIR
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                ADMIN.CONFIG_DIR = root / "config"
+                ADMIN.BACKUP_DIR = root / "backups"
+                ADMIN.CONFIG_DIR.mkdir()
+                ADMIN.atomic_write(ADMIN.CONFIG_DIR / "main.yaml", "old yaml\n", 0o640)
+                ADMIN.atomic_write(ADMIN.CONFIG_DIR / "main.key", "a" * 64 + "\n", 0o640)
+                backup = ADMIN.backup_instance("main", "before-save")
+                ADMIN.atomic_write(ADMIN.CONFIG_DIR / "main.yaml", "new yaml\n", 0o640)
+                ADMIN.restore_instance("main", backup)
+                self.assertEqual((ADMIN.CONFIG_DIR / "main.yaml").read_text(), "old yaml\n")
+                self.assertEqual((ADMIN.CONFIG_DIR / "main.key").read_text().strip(), "a" * 64)
+                metadata = (backup / "backup.json").read_text()
+                self.assertIn('"schema": 1', metadata)
+        finally:
+            ADMIN.CONFIG_DIR = original_config
+            ADMIN.BACKUP_DIR = original_backup
+
 
 class RedactionTests(unittest.TestCase):
     """Secret filtering."""
@@ -91,3 +114,4 @@ class RedactionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

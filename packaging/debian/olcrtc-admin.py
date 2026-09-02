@@ -10,11 +10,14 @@ import base64
 import hashlib
 import hmac
 import html
+import json
 import os
 import re
 import secrets
+import shutil
 import ssl
 import subprocess
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -22,6 +25,8 @@ from urllib.parse import parse_qs, urlparse
 
 CONFIG_DIR = Path("/etc/olcrtc-native")
 LIB_DIR = Path("/usr/local/lib/olcrtc-native")
+STATE_DIR = Path("/var/lib/olcrtc-native")
+BACKUP_DIR = STATE_DIR / "backups"
 CREDENTIAL_PATH = CONFIG_DIR / "admin.credentials"
 INSTALLER = Path("/usr/local/sbin/olcrtc-native-install-server")
 UNIT_PREFIX = "olcrtc-native@"
@@ -33,6 +38,18 @@ PROVIDERS = {"jitsi", "telemost", "wbstream"}
 TRANSPORTS = {"datachannel", "vp8channel", "seichannel", "videochannel"}
 CSRF_TOKEN = secrets.token_urlsafe(32)
 QR_VALUES: dict[str, str] = {}
+LEGACY_SERVICES = ("olcrtc-server.service", "olcrtc-admin.service")
+LEGACY_PATHS = (
+    Path("/etc/systemd/system/olcrtc-server.service"),
+    Path("/etc/systemd/system/olcrtc-server@.service"),
+    Path("/etc/systemd/system/olcrtc-admin.service"),
+    Path("/usr/local/bin/olcrtc"),
+    Path("/usr/local/bin/olcrtc-admin"),
+    Path("/usr/local/bin/olcrtc-launcher"),
+    Path("/usr/local/lib/olcrtc"),
+    Path("/etc/olcrtc"),
+    Path("/var/lib/olcrtc"),
+)
 
 
 # ai-generated: run a fixed local command without a shell and return safe text.
@@ -200,6 +217,93 @@ def atomic_write(path: Path, contents: str, mode: int) -> None:
             pass
 
 
+# ai-generated: copy one regular file into a package-owned timestamped backup.
+def backup_instance(instance: str, reason: str) -> Path:
+    name = instance_name(instance)
+    if not re.fullmatch(r"[a-z-]{3,32}", reason):
+        raise ValueError("invalid backup reason")
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + secrets.token_hex(3)
+    destination = BACKUP_DIR / f"{name}-{reason}-{stamp}"
+    destination.mkdir(parents=True, mode=0o700)
+    copied: list[str] = []
+    for suffix in (".yaml", ".key"):
+        source = CONFIG_DIR / f"{name}{suffix}"
+        if source.is_file() and not source.is_symlink():
+            shutil.copy2(source, destination / source.name, follow_symlinks=False)
+            os.chmod(destination / source.name, 0o600)
+            copied.append(source.name)
+    atomic_write(
+        destination / "backup.json",
+        json.dumps({"schema": 1, "instance": name, "reason": reason, "files": copied}, ensure_ascii=False, indent=2) + "\n",
+        0o600,
+    )
+    return destination
+
+
+# ai-generated: restore the two fixed instance files from a verified local backup.
+def restore_instance(instance: str, backup: Path) -> None:
+    name = instance_name(instance)
+    if backup.parent != BACKUP_DIR or not backup.is_dir() or backup.is_symlink():
+        raise ValueError("invalid backup directory")
+    for suffix in (".yaml", ".key"):
+        saved = backup / f"{name}{suffix}"
+        target = CONFIG_DIR / f"{name}{suffix}"
+        if saved.is_file() and not saved.is_symlink():
+            atomic_write(target, saved.read_text(encoding="utf-8"), 0o640)
+        elif target.exists() and not target.is_symlink():
+            target.unlink()
+
+
+# ai-generated: report exact legacy Manager artifacts without exposing their contents.
+def legacy_report() -> list[str]:
+    return [str(path) for path in LEGACY_PATHS if path.exists() or path.is_symlink()]
+
+
+# ai-generated: preserve exact legacy paths before any destructive migration action.
+def backup_legacy() -> Path:
+    found = legacy_report()
+    if not found:
+        raise ValueError("старая установка Manager не найдена")
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + secrets.token_hex(3)
+    destination = BACKUP_DIR / f"legacy-manager-{stamp}"
+    payload = destination / "root"
+    payload.mkdir(parents=True, mode=0o700)
+    copied: list[str] = []
+    for source in LEGACY_PATHS:
+        if not (source.exists() or source.is_symlink()):
+            continue
+        relative = Path(*source.parts[1:])
+        target = payload / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_symlink():
+            target.symlink_to(os.readlink(source))
+        elif source.is_dir():
+            shutil.copytree(source, target, symlinks=True)
+        elif source.is_file():
+            shutil.copy2(source, target, follow_symlinks=False)
+        copied.append(str(source))
+    atomic_write(
+        destination / "backup.json",
+        json.dumps({"schema": 1, "kind": "legacy-manager", "paths": copied}, ensure_ascii=False, indent=2) + "\n",
+        0o600,
+    )
+    return destination
+
+
+# ai-generated: remove only the documented old Manager paths after a backup.
+def purge_legacy() -> Path:
+    backup = backup_legacy()
+    for service in LEGACY_SERVICES:
+        command("systemctl", "disable", "--now", service, timeout=30)
+    for path in LEGACY_PATHS:
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.is_dir():
+            shutil.rmtree(path)
+    command("systemctl", "daemon-reload", timeout=15)
+    return backup
+
+
 # ai-generated: create or rotate one binary 32-byte key without exposing it in the browser.
 def ensure_key(instance: str, rotate: bool) -> None:
     path = CONFIG_DIR / f"{instance}.key"
@@ -267,7 +371,9 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def send_html(self, title: str, body: str, status: int = 200) -> None:
-        page = f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><style>:root{{color-scheme:dark;--bg:#080910;--card:#12131d;--line:#2a2c3d;--text:#f5f5f7;--muted:#9699aa;--accent:#7c3aed}}*{{box-sizing:border-box}}body{{font-family:system-ui,sans-serif;max-width:1180px;margin:0 auto;padding:28px;background:var(--bg);color:var(--text)}}nav{{padding:16px 18px;border:1px solid var(--line);border-radius:14px;background:var(--card)}}a{{color:#b79cff}}input,select,button{{margin:.3rem;padding:.65rem;border:1px solid var(--line);border-radius:9px;background:#171925;color:var(--text)}}button{{cursor:pointer;background:var(--accent);font-weight:700}}table{{border-collapse:collapse;width:100%;background:var(--card);border-radius:14px;overflow:hidden}}td,th{{padding:.8rem;border-bottom:1px solid var(--line);text-align:left}}pre{{white-space:pre-wrap;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1rem}}.warn{{color:#fbbf24}}.ok{{color:#4ade80}}</style><body><nav><strong>olcRTC Admin</strong> · <a href=/>Инстансы</a> · <a href=/diagnostics>Диагностика</a> · <a href=/update>Обновление</a> · <a href=/security>Безопасность</a></nav><h1>{html.escape(title)}</h1>{body}</body></html>"""
+        page = f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><style>
+:root{{color-scheme:dark;--bg:#09090f;--surface:#12121b;--surface2:#191927;--line:#2d2a3d;--strong:#4c3f72;--text:#f7f8f8;--muted:#8a8f98;--accent:#7c3aed;--accent2:#8b5cf6;--good:#22c55e;--bad:#f97316}}*{{box-sizing:border-box}}body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:1240px;margin:0 auto;padding:24px;background:var(--bg);color:var(--text);line-height:1.5}}nav{{position:sticky;top:12px;z-index:3;display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:14px 18px;border:1px solid var(--line);border-radius:14px;background:rgba(18,18,27,.94);backdrop-filter:blur(12px)}}nav strong{{font-size:19px;margin-right:auto}}a{{color:#c4b5fd;text-decoration:none}}a:hover{{color:#fff}}h1{{font-size:30px;margin:28px 0 18px}}h2{{margin-top:28px}}.card,table,pre{{background:var(--surface);border:1px solid var(--line);border-radius:14px}}.card{{padding:18px;margin:14px 0}}input,select,button{{margin:.3rem;padding:.7rem .85rem;border:1px solid var(--strong);border-radius:9px;background:var(--surface2);color:var(--text);min-height:42px}}input:focus,select:focus{{outline:3px solid rgba(124,58,237,.25);border-color:var(--accent)}}button{{cursor:pointer;background:var(--accent);border-color:var(--accent);font-weight:700}}button:hover{{background:var(--accent2)}}button.danger{{background:transparent;border-color:var(--bad);color:#fdba74}}button.secondary{{background:var(--surface2);border-color:var(--line)}}form{{margin:.45rem 0}}label{{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;margin:.25rem}}table{{border-collapse:separate;border-spacing:0;width:100%;overflow:hidden}}td,th{{padding:.85rem;border-bottom:1px solid var(--line);text-align:left}}tr:last-child td{{border-bottom:0}}pre{{white-space:pre-wrap;padding:1rem;overflow:auto}}.warn{{color:#fbbf24}}.ok{{color:#4ade80}}.bad{{color:#fb923c}}.muted{{color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}}code{{color:#ddd6fe}}@media(max-width:700px){{body{{padding:12px}}table{{display:block;overflow-x:auto}}nav{{top:4px}}}}
+</style><body><nav><strong>◈ olcRTC Admin</strong><a href=/>Инстансы</a><a href=/diagnostics>Диагностика</a><a href=/backups>Копии</a><a href=/legacy>Старый Manager</a><a href=/update>Обновление</a><a href=/security>Безопасность</a></nav><h1>{html.escape(title)}</h1>{body}</body></html>"""
         encoded = page.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -311,8 +417,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(encoded)
             return
         if route == "/":
-            rows = "".join(f"<tr><td>{html.escape(name)}</td><td>{html.escape(active)}</td><td>{html.escape(enabled)}</td><td>{'UI' if owned else 'внешний YAML'}</td><td><a href='/edit?instance={html.escape(name, quote=True)}'>изменить</a> <a href='/uri?instance={html.escape(name, quote=True)}'>URI</a> <a href='/logs?instance={html.escape(name, quote=True)}'>журнал</a>{self.actions(name)}</td></tr>" for name, active, enabled, owned in instances())
-            self.send_html("olcRTC: инстансы", f"<table><tr><th>Имя</th><th>Состояние</th><th>Автозапуск</th><th>Конфиг</th><th></th></tr>{rows}</table><h2>Новый инстанс</h2>{self.form()}")
+            rows = "".join(f"<tr><td><strong>{html.escape(name)}</strong></td><td>{html.escape(active)}</td><td>{html.escape(enabled)}</td><td>{'Управляется UI' if owned else 'Внешний YAML'}</td><td><a href='/edit?instance={html.escape(name, quote=True)}'>Настройки</a> · <a href='/uri?instance={html.escape(name, quote=True)}'>URI</a> · <a href='/logs?instance={html.escape(name, quote=True)}'>Журнал</a>{self.actions(name)}</td></tr>" for name, active, enabled, owned in instances())
+            empty = "<p class=muted>Инстансов пока нет. Создайте первый ниже.</p>" if not rows else ""
+            self.send_html("Инстансы", f"<div class=card><p>Серверные подключения и их фактическое состояние.</p>{empty}<table><tr><th>Имя</th><th>Состояние</th><th>Автозапуск</th><th>Конфиг</th><th>Управление</th></tr>{rows}</table></div><h2>Новый инстанс</h2><div class=card>{self.form()}</div>")
             return
         if route == "/edit":
             try:
@@ -348,8 +455,27 @@ class Handler(BaseHTTPRequestHandler):
             _, system = command("systemctl", "is-system-running", timeout=5)
             binary = LIB_DIR / "current" / "olcrtc"
             manifest = LIB_DIR / "current" / "manifest.tsv"
-            details = f"systemd: {system.strip()}\nбинарник: {'есть' if binary.is_file() else 'не найден'}\nmanifest: {'есть' if manifest.is_file() else 'не найден'}\nинстансов: {len(instances())}\n"
-            self.send_html("Диагностика", f"<pre>{html.escape(details)}</pre>")
+            code, failed = command("systemctl", "--failed", "--no-pager", "--plain", timeout=10)
+            disk = shutil.disk_usage(STATE_DIR if STATE_DIR.exists() else Path("/"))
+            details = f"systemd: {system.strip()}\nбинарник: {'есть' if binary.is_file() else 'не найден'}\nmanifest: {'есть' if manifest.is_file() else 'не найден'}\nинстансов: {len(instances())}\nсвободно: {disk.free // 1024 // 1024} MiB\nстарый Manager: {len(legacy_report())} объектов\n\nfailed units (code={code}):\n{redact(failed)}"
+            self.send_html("Диагностика", f"<div class=card><p>Отчёт не содержит ключи и пароли.</p><pre>{html.escape(details)}</pre></div>")
+            return
+        if route == "/backups":
+            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            items = []
+            for path in sorted(BACKUP_DIR.iterdir(), reverse=True):
+                if path.is_dir() and not path.is_symlink():
+                    items.append(f"<li><code>{html.escape(path.name)}</code></li>")
+            listing = "".join(items) or "<li>Резервных копий пока нет.</li>"
+            self.send_html("Резервные копии", f"<div class=card><p>Копии хранятся локально в <code>{html.escape(str(BACKUP_DIR))}</code> с правами root.</p><ul>{listing}</ul></div>")
+            return
+        if route == "/legacy":
+            found = legacy_report()
+            listing = "".join(f"<li><code>{html.escape(path)}</code></li>" for path in found) or "<li>Старая установка не найдена.</li>"
+            purge = ""
+            if found:
+                purge = f'''<form method=post action=/purge-legacy><input type=hidden name=csrf value="{CSRF_TOKEN}"><label>Введите <code>УДАЛИТЬ СТАРЫЙ MANAGER</code><input required name=confirmation></label><button class=danger>Создать копию и удалить старый Manager</button></form>'''
+            self.send_html("Старый Manager", f"<div class=card><p>Найдены только перечисленные объекты. Новый продукт их не использует.</p><ul>{listing}</ul>{purge}<p class=warn>Удаление не затрагивает <code>/etc/olcrtc-native</code> и сначала создаёт резервную копию.</p></div>")
             return
         if route == "/update":
             self.send_html("Обновление", f"<form method=post action=/update><input type=hidden name=csrf value=\"{CSRF_TOKEN}\"><label>Тег выпуска (пусто = latest) <input name=release></label><button>Скачать и применить</button></form><p>Активные инстансы перезапустятся. Конфигурации не заменяются.</p>")
@@ -372,16 +498,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         route = urlparse(self.path).path
         if route == "/save":
+            backup: Path | None = None
+            was_active = False
             try:
                 config = config_values(values)
                 CONFIG_DIR.mkdir(mode=0o750, parents=True, exist_ok=True)
                 path = CONFIG_DIR / f"{config['instance']}.yaml"
                 if path.is_symlink():
                     raise ValueError("refusing symbolic-link configuration")
+                was_active = unit_state(config["instance"])[0] == "active"
+                backup = backup_instance(config["instance"], "before-save")
                 atomic_write(path, config_text(config), 0o640)
                 import grp
                 os.chown(path, 0, grp.getgrnam("olcrtc-native").gr_gid)
                 ensure_key(config["instance"], values.get("rotate_key") == "on")
+                if was_active:
+                    code, output = command("systemctl", "restart", f"{UNIT_PREFIX}{config['instance']}.service", timeout=30)
+                    if code != 0 or unit_state(config["instance"])[0] != "active":
+                        if backup is not None:
+                            restore_instance(config["instance"], backup)
+                            command("systemctl", "restart", f"{UNIT_PREFIX}{config['instance']}.service", timeout=30)
+                        raise ValueError("новая конфигурация не запустилась; предыдущая восстановлена: " + redact(output))
             except (OSError, ValueError) as exc:
                 self.send_html("Конфигурация не сохранена", self.form(values, str(exc)), 400)
                 return
@@ -398,6 +535,52 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html("Ошибка", f"<p>{html.escape(str(exc))}</p>", 400)
                 return
             self.send_html("Операция службы", f"<p>{html.escape(action)}: {'готово' if code == 0 else 'ошибка'}</p><pre>{html.escape(redact(output))}</pre>{self.actions(name)}")
+            return
+        if route == "/clone":
+            try:
+                source = instance_name(values.get("source", ""))
+                destination = instance_name(values.get("destination", ""))
+                current = managed_config(source)
+                if current is None:
+                    raise ValueError("клонировать можно только конфигурацию, управляемую UI")
+                target = CONFIG_DIR / f"{destination}.yaml"
+                if target.exists() or target.is_symlink():
+                    raise ValueError("инстанс с таким именем уже существует")
+                current["instance"] = destination
+                atomic_write(target, config_text(current), 0o640)
+                ensure_key(destination, True)
+            except (OSError, ValueError) as exc:
+                self.send_html("Клонирование не выполнено", f"<p class=bad>{html.escape(str(exc))}</p>", 400)
+                return
+            self.send_html("Инстанс клонирован", f"<p class=ok>{html.escape(source)} → {html.escape(destination)}. Создан новый ключ.</p>{self.actions(destination)}")
+            return
+        if route == "/delete":
+            try:
+                name = instance_name(values.get("instance", ""))
+                if values.get("confirmation") != name:
+                    raise ValueError("для удаления введите точное имя инстанса")
+                backup = backup_instance(name, "before-delete")
+                command("systemctl", "disable", "--now", f"{UNIT_PREFIX}{name}.service", timeout=30)
+                for suffix in (".yaml", ".key"):
+                    target = CONFIG_DIR / f"{name}{suffix}"
+                    if target.is_symlink():
+                        raise ValueError("отказ удаления символической ссылки")
+                    target.unlink(missing_ok=True)
+            except (OSError, ValueError) as exc:
+                self.send_html("Удаление не выполнено", f"<p class=bad>{html.escape(str(exc))}</p>", 400)
+                return
+            self.send_html("Инстанс удалён", f"<p class=ok>Инстанс удалён. Копия: <code>{html.escape(str(backup))}</code>.</p>")
+            return
+        if route == "/purge-legacy":
+            if values.get("confirmation") != "УДАЛИТЬ СТАРЫЙ MANAGER":
+                self.send_html("Удаление отменено", "<p class=bad>Контрольная фраза не совпала.</p>", 400)
+                return
+            try:
+                backup = purge_legacy()
+            except (OSError, ValueError) as exc:
+                self.send_html("Старый Manager не удалён", f"<p class=bad>{html.escape(str(exc))}</p>", 500)
+                return
+            self.send_html("Старый Manager удалён", f"<p class=ok>Удалены только перечисленные старые пути. Копия: <code>{html.escape(str(backup))}</code>.</p>")
             return
         if route == "/update":
             release = values.get("release", "") or "latest"
@@ -443,7 +626,9 @@ class Handler(BaseHTTPRequestHandler):
     def actions(self, name: str) -> str:
         escaped = html.escape(name, quote=True)
         forms = "".join(f'<form style="display:inline" method=post action=/action><input type=hidden name=csrf value="{CSRF_TOKEN}"><input type=hidden name=instance value="{escaped}"><input type=hidden name=action value="{action}"><button>{label}</button></form>' for action, label in (("start", "Запустить"), ("stop", "Остановить"), ("restart", "Перезапустить"), ("enable", "Включить"), ("disable", "Выключить")))
-        return f"<p>{forms} <a href='/logs?instance={escaped}'>Журнал</a></p>"
+        clone = f'<form style="display:inline" method=post action=/clone><input type=hidden name=csrf value="{CSRF_TOKEN}"><input type=hidden name=source value="{escaped}"><input required placeholder="Имя копии" name=destination><button class=secondary>Клонировать</button></form>'
+        delete = f'<form style="display:inline" method=post action=/delete><input type=hidden name=csrf value="{CSRF_TOKEN}"><input type=hidden name=instance value="{escaped}"><input required placeholder="Введите {escaped}" name=confirmation><button class=danger>Удалить</button></form>'
+        return f"<div>{forms}{clone}{delete}</div>"
 
 
 # ai-generated: start the loopback-only HTTPS-free administration server behind SSH forwarding.
@@ -480,8 +665,6 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
 # ai-generated: create a salted memory-hard password verifier.
 def hash_password(password: str) -> str:
     if len(password) < 12:
@@ -503,3 +686,8 @@ def verify_password(password: str, encoded: str) -> bool:
     except (ValueError, TypeError):
         return False
     return hmac.compare_digest(actual, expected)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

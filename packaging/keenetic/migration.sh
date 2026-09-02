@@ -110,8 +110,26 @@ case "${1:-status}" in
         "$OLCRTC_LEGACY_INIT" start || olc_die "legacy service was restored but failed to start"
         olc_log "legacy service restored; native client disabled"
         ;;
+    purge-legacy)
+        [ -f "$OLCRTC_LEGACY_DISABLED" ] \
+            || olc_die "cut over successfully before deleting the legacy client"
+        wait_native || olc_die "native client is not healthy; legacy files were preserved"
+        stamp=$(date -u +%Y%m%dT%H%M%SZ)
+        backup="$OLCRTC_STATE/legacy-backups/$stamp"
+        mkdir -p "$backup"
+        chmod 700 "$OLCRTC_STATE/legacy-backups" "$backup"
+        for path in "$OLCRTC_LEGACY_DISABLED" "$OLCRTC_LEGACY_ETC" "$OLCRTC_LEGACY_BIN"; do
+            if [ -e "$path" ] || [ -L "$path" ]; then
+                cp -a "$path" "$backup/"
+            fi
+        done
+        rm -f "$OLCRTC_LEGACY_DISABLED" "$OLCRTC_LEGACY_BIN"
+        rm -rf "$OLCRTC_LEGACY_ETC"
+        olc_log "legacy client removed; backup: $backup"
+        ;;
     *)
-        printf '%s\n' "usage: $0 {status|enable|cutover|rollback}" >&2
+        printf '%s\n' "usage: $0 {status|enable|cutover|rollback|purge-legacy}" >&2
         exit 2
         ;;
 esac
+

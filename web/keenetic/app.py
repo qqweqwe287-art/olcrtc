@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -59,6 +59,7 @@ class Settings:
     doctor: str
     config_helper: str
     client_config: str
+    config_path: str
 
 
 class ControlState:
@@ -217,6 +218,9 @@ class ControlHandler(BaseHTTPRequestHandler):
         if self.path == "/api/settings":
             self._save_settings(payload)
             return
+        if self.path == "/api/change-credentials":
+            self._change_credentials(payload)
+            return
         self._json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
     # ai-generated: authenticate a bounded login request.
@@ -264,6 +268,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             "legacy-rollback": ["/opt/lib/olcrtc-keenetic/migration.sh", "rollback"],
             "update": ["/opt/lib/olcrtc-keenetic/upgrade.sh"],
             "binary-rollback": ["/opt/lib/olcrtc-keenetic/rollback.sh"],
+            "purge-legacy": ["/opt/lib/olcrtc-keenetic/migration.sh", "purge-legacy"],
         }
         command = commands.get(action)
         if command is None:
@@ -295,6 +300,35 @@ class ControlHandler(BaseHTTPRequestHandler):
         helper = self._state().settings.config_helper
         ok, output = run_command([helper, "--settings-stdin"], 15, encoded)
         self._json({"ok": ok, "output": redact(output)}, HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST)
+
+    # ai-generated: atomically rotate panel credentials and revoke existing sessions.
+    def _change_credentials(self, payload: dict[str, Any]) -> None:
+        username = str(payload.get("username", ""))
+        password = str(payload.get("password", ""))
+        confirmation = str(payload.get("confirmation", ""))
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
+            self._json({"error": "username_invalid"}, HTTPStatus.BAD_REQUEST)
+            return
+        if len(password) < 12 or not hmac.compare_digest(password, confirmation):
+            self._json({"error": "password_invalid_or_mismatch"}, HTTPStatus.BAD_REQUEST)
+            return
+        state = self._state()
+        path = Path(state.settings.config_path)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("web config must be an object")
+            encoded = hash_password(password)
+            raw["username"] = username
+            raw["password_hash"] = encoded
+            atomic_json(path, raw, 0o600)
+            state.settings = replace(state.settings, username=username, password_hash=encoded)
+            with state.lock:
+                state.sessions.clear()
+        except (OSError, ValueError, json.JSONDecodeError):
+            self._json({"error": "credential_update_failed"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._clear_cookie()
 
     # ai-generated: combine process, SOCKS and diagnostic status.
     def _status_payload(self) -> dict[str, Any]:
@@ -479,6 +513,22 @@ def read_text(path: Path, limit: int) -> str | None:
         return None
 
 
+# ai-generated: write one JSON object with restrictive permissions and atomic replacement.
+def atomic_json(path: Path, payload: dict[str, Any], mode: int) -> None:
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(payload, output, ensure_ascii=False, indent=2)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, mode)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 # ai-generated: load and validate persistent web settings.
 # ai-generated: permit only loopback or an explicitly enabled RFC1918 listener.
 def validate_bind_address(bind: str, allow_lan: bool) -> None:
@@ -524,6 +574,7 @@ def load_settings(path: Path) -> Settings:
         doctor=str(payload.get("doctor", "/opt/lib/olcrtc-keenetic/doctor.sh")),
         config_helper=str(payload.get("config_helper", "/opt/lib/olcrtc-keenetic/import-uri.sh")),
         client_config=str(payload.get("client_config", "/opt/etc/olcrtc-keenetic/client.yaml")),
+        config_path=str(path),
     )
     validate_bind_address(settings.bind, settings.allow_lan)
     if not 1 <= settings.port <= 65535:
@@ -609,18 +660,20 @@ def main() -> int:
 INDEX_HTML = r"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>olcRTC</title><style>
-:root{color-scheme:dark;--bg:#0b1118;--card:#121c26;--line:#263747;--text:#e7eef5;--muted:#91a3b5;--ok:#54d18b;--bad:#ff6b6b;--accent:#46a6ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}main{max-width:960px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between}h1{font-size:24px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}button,input,select{font:inherit;border-radius:9px;border:1px solid var(--line);padding:10px 12px}button{background:#1b3145;color:var(--text);cursor:pointer}button.primary{background:var(--accent);color:#07121d}input,select{width:100%;background:#0b141d;color:var(--text)}label{display:grid;gap:6px;color:var(--muted)}pre{white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto;color:#c8d5e0}.muted{color:var(--muted)}.hidden{display:none}.ok{color:var(--ok)}.bad{color:var(--bad)}.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1;min-width:110px}
+:root{color-scheme:dark;--bg:#09090f;--card:#12121b;--card2:#191927;--line:#2d2a3d;--strong:#4c3f72;--text:#f7f8f8;--muted:#8a8f98;--ok:#22c55e;--bad:#f97316;--accent:#7c3aed;--accent2:#8b5cf6}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}main{max-width:1020px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:25px}h2{font-size:19px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0}.card:hover{border-color:var(--strong)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}button,input,select{font:inherit;border-radius:9px;border:1px solid var(--strong);padding:10px 12px;min-height:42px}button{background:var(--card2);color:var(--text);cursor:pointer}button:hover{border-color:var(--accent2)}button.primary{background:var(--accent);border-color:var(--accent);color:white;font-weight:700}button.danger{background:transparent;border-color:var(--bad);color:#fdba74}input,select{width:100%;background:var(--card2);color:var(--text)}input:focus,select:focus{outline:3px solid rgba(124,58,237,.25);border-color:var(--accent)}label{display:grid;gap:6px;color:var(--muted)}pre{white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto;color:#d0d6e0;background:#0c0c14;border-radius:10px;padding:12px}.muted{color:var(--muted)}.hidden{display:none}.ok{color:var(--ok)}.bad{color:var(--bad)}.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1;min-width:110px}@media(max-width:650px){main{padding:12px}.top{align-items:flex-start}}
 </style></head><body><main><div class="top"><h1>olcRTC</h1><button id="logout" class="hidden">Выйти</button></div>
 <section id="login" class="card"><h2>Вход</h2><div class="grid"><input id="user" value="admin" autocomplete="username"><input id="pass" type="password" placeholder="Пароль" autocomplete="current-password"></div><p><button id="loginBtn" class="primary">Войти</button> <span id="loginMsg" class="bad"></span></p></section>
 <div id="app" class="hidden"><section class="card"><div class="top"><h2>Состояние</h2><button id="refresh">Обновить</button></div><p id="health" class="muted">Проверка...</p><pre id="status"></pre><div class="row"><button data-action="start">Запустить</button><button data-action="restart">Перезапустить</button><button data-action="stop">Остановить</button><button data-action="probe">Проверить SOCKS</button><button data-action="diagnostics">Диагностика</button></div></section>
 <section class="card"><h2>Подключение</h2><p class="muted">Принимается только canonical olcrtc:// URI. Секрет не показывается повторно.</p><input id="uri" type="password" placeholder="olcrtc://..."><p><button id="importBtn" class="primary">Проверить и применить</button> <span id="importMsg"></span></p></section>
 <section class="card"><h2>Параметры клиента</h2><div class="grid"><label>Provider<select id="provider"><option>jitsi</option><option>telemost</option><option>wbstream</option></select></label><label>Transport<select id="transport"><option>datachannel</option><option>vp8channel</option><option>seichannel</option><option>videochannel</option></select></label><label>Комната<input id="room" placeholder="https://meet.example/room"></label></div><p><button id="loadProfile">Загрузить</button> <button id="saveProfile" class="primary">Сохранить</button> <span id="profileMsg"></span></p><p class="muted">Расширенные параметры transport сохраняются при импорте URI. Форма меняет основные совместимые поля, не показывая ключ.</p></section>
-<section class="card"><h2>Миграция и обновление</h2><p class="muted">Если старый клиент занимает SOCKS-порт, используйте «Переключить». При ошибке старая служба запускается обратно.</p><div class="row"><button data-action="enable-native">Включить новый</button><button data-action="cutover" class="primary">Переключить со старого</button><button data-action="legacy-rollback">Вернуть старый</button><button data-action="update">Обновить</button><button data-action="binary-rollback">Откатить бинарник</button></div></section>
+<section class="card"><h2>Миграция и обновление</h2><p class="muted">Если старый клиент занимает SOCKS-порт, используйте «Переключить». При ошибке старая служба запускается обратно. Удаление доступно только после успешного переключения и создаёт локальную копию.</p><div class="row"><button data-action="enable-native">Включить новый</button><button data-action="cutover" class="primary">Переключить со старого</button><button data-action="legacy-rollback">Вернуть старый</button><button data-action="update">Обновить</button><button data-action="binary-rollback">Откатить бинарник</button><button data-action="purge-legacy" class="danger">Удалить старый клиент</button></div></section>
+<section class="card"><h2>Безопасность панели</h2><div class="grid"><label>Новый логин<input id="newUser" value="admin" autocomplete="username"></label><label>Новый пароль<input id="newPass" type="password" minlength="12" autocomplete="new-password"></label><label>Повторите пароль<input id="newConfirm" type="password" minlength="12" autocomplete="new-password"></label></div><p><button id="credentialsBtn" class="primary">Сменить логин и пароль</button> <span id="credentialsMsg"></span></p><p class="muted">После смены все активные сессии будут завершены.</p></section>
 <section class="card"><div class="top"><h2>Журнал</h2><button id="logsBtn">Обновить</button></div><pre id="logs"></pre></section></div>
 <script>
-let csrf='';const q=s=>document.querySelector(s);async function api(path,options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const j=await r.json();if(!r.ok)throw new Error(j.error||'request_failed');return j}async function session(){const s=await api('/api/session');if(s.authenticated){csrf=s.csrf;q('#login').classList.add('hidden');q('#app').classList.remove('hidden');q('#logout').classList.remove('hidden');await refresh()}}async function refresh(){const j=await api('/api/status');q('#health').textContent=j.ok?'Туннель готов':'Требуется внимание';q('#health').className=j.ok?'ok':'bad';q('#status').textContent=JSON.stringify(j,null,2)}async function loadProfile(){try{const j=await api('/api/profile');if(!j.ok||!j.profile)throw new Error(j.output||'Сначала импортируйте URI');q('#provider').value=j.profile.provider;q('#transport').value=j.profile.transport;q('#room').value=j.profile.room;q('#profileMsg').textContent='Загружено'}catch(e){q('#profileMsg').textContent=e.message}}q('#loginBtn').onclick=async()=>{try{const j=await api('/api/login',{method:'POST',body:JSON.stringify({username:q('#user').value,password:q('#pass').value})});csrf=j.csrf;q('#pass').value='';await session()}catch(e){q('#loginMsg').textContent=e.message}};q('#refresh').onclick=refresh;q('#logsBtn').onclick=async()=>{const j=await api('/api/logs');q('#logs').textContent=j.output};document.querySelectorAll('[data-action]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{const j=await api('/api/action',{method:'POST',body:JSON.stringify({csrf,action:b.dataset.action})});q('#status').textContent=j.output;await refresh()}catch(e){q('#status').textContent=e.message}finally{b.disabled=false}});q('#importBtn').onclick=async()=>{try{const j=await api('/api/import-uri',{method:'POST',body:JSON.stringify({csrf,uri:q('#uri').value})});q('#uri').value='';q('#importMsg').textContent=j.output||'Применено';await loadProfile();await refresh()}catch(e){q('#importMsg').textContent=e.message}};q('#loadProfile').onclick=loadProfile;q('#saveProfile').onclick=async()=>{try{const current=await api('/api/profile');const selected=q('#transport').value;const parameters=current.profile&&current.profile.transport===selected&&current.profile.parameters?current.profile.parameters:{};const profile={provider:q('#provider').value,transport:selected,room:q('#room').value,parameters};const j=await api('/api/settings',{method:'POST',body:JSON.stringify({csrf,profile})});q('#profileMsg').textContent=j.output||'Сохранено'}catch(e){q('#profileMsg').textContent=e.message}};q('#logout').onclick=async()=>{await api('/api/logout',{method:'POST',body:JSON.stringify({csrf})});location.reload()};session();
+let csrf='';const q=s=>document.querySelector(s);async function api(path,options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const j=await r.json();if(!r.ok)throw new Error(j.error||'request_failed');return j}async function session(){const s=await api('/api/session');if(s.authenticated){csrf=s.csrf;q('#login').classList.add('hidden');q('#app').classList.remove('hidden');q('#logout').classList.remove('hidden');await refresh()}}async function refresh(){const j=await api('/api/status');q('#health').textContent=j.ok?'Туннель готов':'Требуется внимание';q('#health').className=j.ok?'ok':'bad';q('#status').textContent=JSON.stringify(j,null,2)}async function loadProfile(){try{const j=await api('/api/profile');if(!j.ok||!j.profile)throw new Error(j.output||'Сначала импортируйте URI');q('#provider').value=j.profile.provider;q('#transport').value=j.profile.transport;q('#room').value=j.profile.room;q('#profileMsg').textContent='Загружено'}catch(e){q('#profileMsg').textContent=e.message}}q('#loginBtn').onclick=async()=>{try{const j=await api('/api/login',{method:'POST',body:JSON.stringify({username:q('#user').value,password:q('#pass').value})});csrf=j.csrf;q('#pass').value='';await session()}catch(e){q('#loginMsg').textContent=e.message}};q('#refresh').onclick=refresh;q('#logsBtn').onclick=async()=>{const j=await api('/api/logs');q('#logs').textContent=j.output};document.querySelectorAll('[data-action]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{if(b.dataset.action==='purge-legacy'&&!confirm('Удалить старый клиент после создания резервной копии?'))return;const j=await api('/api/action',{method:'POST',body:JSON.stringify({csrf,action:b.dataset.action})});q('#status').textContent=j.output;await refresh()}catch(e){q('#status').textContent=e.message}finally{b.disabled=false}});q('#importBtn').onclick=async()=>{try{const j=await api('/api/import-uri',{method:'POST',body:JSON.stringify({csrf,uri:q('#uri').value})});q('#uri').value='';q('#importMsg').textContent=j.output||'Применено';await loadProfile();await refresh()}catch(e){q('#importMsg').textContent=e.message}};q('#loadProfile').onclick=loadProfile;q('#saveProfile').onclick=async()=>{try{const current=await api('/api/profile');const selected=q('#transport').value;const parameters=current.profile&&current.profile.transport===selected&&current.profile.parameters?current.profile.parameters:{};const profile={provider:q('#provider').value,transport:selected,room:q('#room').value,parameters};const j=await api('/api/settings',{method:'POST',body:JSON.stringify({csrf,profile})});q('#profileMsg').textContent=j.output||'Сохранено'}catch(e){q('#profileMsg').textContent=e.message}};q('#credentialsBtn').onclick=async()=>{try{await api('/api/change-credentials',{method:'POST',body:JSON.stringify({csrf,username:q('#newUser').value,password:q('#newPass').value,confirmation:q('#newConfirm').value})});location.reload()}catch(e){q('#credentialsMsg').textContent=e.message}};q('#logout').onclick=async()=>{await api('/api/logout',{method:'POST',body:JSON.stringify({csrf})});location.reload()};session();
 </script></main></body></html>"""
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

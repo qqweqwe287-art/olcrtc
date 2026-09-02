@@ -16,6 +16,8 @@ OLCRTC_INIT="$OLCRTC_PREFIX/etc/init.d/S96olcrtc-native"
 OLCRTC_ENABLED="$OLCRTC_ETC/native.enabled"
 OLCRTC_LEGACY_INIT="$OLCRTC_PREFIX/etc/init.d/S98olcrtc-client"
 OLCRTC_LEGACY_DISABLED="$OLCRTC_PREFIX/etc/init.d/S98olcrtc-client.olcrtc-disabled"
+OLCRTC_LEGACY_ETC="$OLCRTC_PREFIX/etc/olcrtc-client"
+OLCRTC_LEGACY_BIN="$OLCRTC_PREFIX/bin/olcrtc-client"
 OLCRTC_RUNNER_PID="$OLCRTC_RUN/supervisor.pid"
 OLCRTC_CHILD_PID="$OLCRTC_RUN/client.pid"
 OLCRTC_BLOCKED="$OLCRTC_RUN/blocked.reason"
@@ -171,3 +173,4 @@ olc_rotate_log() {
     [ ! -f "$file.1" ] || mv "$file.1" "$file.2"
     mv "$file" "$file.1"
 }
+

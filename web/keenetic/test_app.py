@@ -117,7 +117,17 @@ class SettingsTests(unittest.TestCase):
             APP.initialize_settings(path, "127.0.0.1", 8091, False, password_file)
             settings = APP.load_settings(path)
             self.assertTrue(APP.verify_password("installer-generated-password", settings.password_hash))
+            self.assertEqual(settings.config_path, str(path))
+
+    # ai-generated: replace a credential document atomically without leaving a staging file.
+    def test_atomic_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "web.json")
+            APP.atomic_json(path, {"username": "new-admin", "password_hash": "hidden"}, 0o600)
+            self.assertIn('"new-admin"', path.read_text(encoding="utf-8"))
+            self.assertEqual(list(path.parent.glob(".*.tmp")), [])
 
 
 if __name__ == "__main__":
     unittest.main()
+
