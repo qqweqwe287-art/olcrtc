@@ -28,6 +28,7 @@ LIB_DIR = Path("/usr/local/lib/olcrtc-native")
 STATE_DIR = Path("/var/lib/olcrtc-native")
 BACKUP_DIR = STATE_DIR / "backups"
 CREDENTIAL_PATH = CONFIG_DIR / "admin.credentials"
+ADMIN_SETTINGS_PATH = CONFIG_DIR / "admin.json"
 INSTALLER = Path("/usr/local/sbin/olcrtc-native-install-server")
 UNIT_PREFIX = "olcrtc-native@"
 MANAGED_HEADER = "# Managed by olcRTC local admin UI."
@@ -317,6 +318,44 @@ def atomic_write(path: Path, contents: str, mode: int) -> None:
             pass
 
 
+# ai-generated: load the small non-secret admin settings document with strict types.
+def admin_settings() -> dict[str, object]:
+    try:
+        payload = json.loads(ADMIN_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"schema": 1, "public_base_url": "", "subscriptions": {}}
+    if not isinstance(payload, dict) or set(payload) != {"schema", "public_base_url", "subscriptions"} or payload.get("schema") != 1:
+        raise ValueError("admin settings schema is invalid")
+    base_url = payload.get("public_base_url")
+    subscriptions = payload.get("subscriptions")
+    if not isinstance(base_url, str) or not isinstance(subscriptions, dict):
+        raise ValueError("admin settings types are invalid")
+    if not all(re.fullmatch(r"[0-9a-f]{64}", key) and isinstance(value, str) and INSTANCE_RE.fullmatch(value) for key, value in subscriptions.items()):
+        raise ValueError("subscription index is invalid")
+    return payload
+
+
+# ai-generated: persist validated admin settings without following a user path.
+def save_admin_settings(payload: dict[str, object]) -> None:
+    current = admin_settings() if ADMIN_SETTINGS_PATH.exists() else {"schema": 1, "public_base_url": "", "subscriptions": {}}
+    del current
+    ADMIN_SETTINGS_PATH.parent.mkdir(parents=True, mode=0o750, exist_ok=True)
+    atomic_write(ADMIN_SETTINGS_PATH, json.dumps(payload, ensure_ascii=False, indent=2) + "\n", 0o600)
+
+
+# ai-generated: accept only an HTTPS origin with no credentials, query, fragment or path.
+def public_base_url(value: str) -> str:
+    value = value.strip().rstrip("/")
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        raise ValueError("public URL must be an https://host[:port] origin")
+    if parsed.port is not None and not 1 <= parsed.port <= 65535:
+        raise ValueError("public URL port is invalid")
+    return value
+
+
 # ai-generated: copy one regular file into a package-owned timestamped backup.
 def backup_instance(instance: str, reason: str) -> Path:
     name = instance_name(instance)
@@ -501,7 +540,7 @@ class Handler(BaseHTTPRequestHandler):
     def send_html(self, title: str, body: str, status: int = 200) -> None:
         page = f"""<!doctype html><html lang=ru><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><style>
 :root{{color-scheme:dark;--bg:#09090f;--surface:#12121b;--surface2:#191927;--line:#2d2a3d;--strong:#4c3f72;--text:#f7f8f8;--muted:#8a8f98;--accent:#7c3aed;--accent2:#8b5cf6;--good:#22c55e;--bad:#f97316}}*{{box-sizing:border-box}}body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:1240px;margin:0 auto;padding:24px;background:var(--bg);color:var(--text);line-height:1.5}}nav{{position:sticky;top:12px;z-index:3;display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:14px 18px;border:1px solid var(--line);border-radius:14px;background:rgba(18,18,27,.94);backdrop-filter:blur(12px)}}nav strong{{font-size:19px;margin-right:auto}}a{{color:#c4b5fd;text-decoration:none}}a:hover{{color:#fff}}h1{{font-size:30px;margin:28px 0 18px}}h2{{margin-top:28px}}.card,table,pre{{background:var(--surface);border:1px solid var(--line);border-radius:14px}}.card{{padding:18px;margin:14px 0}}input,select,button{{margin:.3rem;padding:.7rem .85rem;border:1px solid var(--strong);border-radius:9px;background:var(--surface2);color:var(--text);min-height:42px}}input:focus,select:focus{{outline:3px solid rgba(124,58,237,.25);border-color:var(--accent)}}button{{cursor:pointer;background:var(--accent);border-color:var(--accent);font-weight:700}}button:hover{{background:var(--accent2)}}button.danger{{background:transparent;border-color:var(--bad);color:#fdba74}}button.secondary{{background:var(--surface2);border-color:var(--line)}}form{{margin:.45rem 0}}label{{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;margin:.25rem}}table{{border-collapse:separate;border-spacing:0;width:100%;overflow:hidden}}td,th{{padding:.85rem;border-bottom:1px solid var(--line);text-align:left}}tr:last-child td{{border-bottom:0}}pre{{white-space:pre-wrap;padding:1rem;overflow:auto}}.warn{{color:#fbbf24}}.ok{{color:#4ade80}}.bad{{color:#fb923c}}.muted{{color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}}code{{color:#ddd6fe}}@media(max-width:700px){{body{{padding:12px}}table{{display:block;overflow-x:auto}}nav{{top:4px}}}}
-</style><body><nav><strong>◈ olcRTC Admin</strong><a href=/>Инстансы</a><a href=/diagnostics>Диагностика</a><a href=/backups>Копии</a><a href=/legacy>Старый Manager</a><a href=/update>Обновление</a><a href=/security>Безопасность</a></nav><h1>{html.escape(title)}</h1>{body}</body></html>"""
+</style><body><nav><strong>◈ olcRTC Admin</strong><a href=/>Инстансы</a><a href=/subscriptions>Подписки</a><a href=/diagnostics>Диагностика</a><a href=/backups>Копии</a><a href=/legacy>Старый Manager</a><a href=/update>Обновление</a><a href=/security>Безопасность</a></nav><h1>{html.escape(title)}</h1>{body}</body></html>"""
         encoded = page.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -535,9 +574,32 @@ class Handler(BaseHTTPRequestHandler):
         return f'''<p class=warn>{html.escape(warning)}</p><form method=post action=/save><input type=hidden name=csrf value="{CSRF_TOKEN}"><div class=grid><label>Инстанс <input required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{{0,63}}" name=instance value="{field('instance')}"></label><label>Provider <select name=provider>{provider_options}</select></label><label>Transport <select name=transport>{transport_options}</select></label><label>Комната / URL <input required name=room value="{field('room')}"></label><label>DNS <input required name=dns value="{field('dns')}"></label><label>Liveness interval <input required name=liveness_interval value="{field('liveness_interval')}"></label><label>Liveness timeout <input required name=liveness_timeout value="{field('liveness_timeout')}"></label><label>Ошибок до reconnect <input required type=number min=1 max=100 name=liveness_failures value="{field('liveness_failures')}"></label><label>Макс. время сессии <input required name=max_session_duration value="{field('max_session_duration')}"></label><label>Traffic max payload <input required type=number min=0 max=1048576 name=traffic_max_payload value="{field('traffic_max_payload')}"></label><label>Traffic min delay <input name=traffic_min_delay placeholder="например 5ms" value="{field('traffic_min_delay')}"></label><label>Traffic max delay <input name=traffic_max_delay placeholder="например 30ms" value="{field('traffic_max_delay')}"></label><label>Debug <select name=debug>{debug_options}</select></label></div><h3>Transport</h3><div class=grid><label>FPS <input required type=number min=1 max=240 name=transport_fps value="{field('transport_fps')}"></label><label>Batch <input required type=number min=1 max=1000000 name=transport_batch value="{field('transport_batch')}"></label><label>SEI fragment <input required type=number min=1 max=60000 name=transport_frag value="{field('transport_frag')}"></label><label>SEI ACK, мс <input required type=number min=1 max=3600000 name=transport_ack value="{field('transport_ack')}"></label><label>Video width <input required type=number min=16 max=8192 name=video_w value="{field('video_w')}"></label><label>Video height <input required type=number min=16 max=8192 name=video_h value="{field('video_h')}"></label><label>Video codec <select name=video_codec><option value=qrcode{" selected" if values.get("video_codec") == "qrcode" else ""}>qrcode</option><option value=tile{" selected" if values.get("video_codec") == "tile" else ""}>tile</option></select></label><label>QR size <input required type=number min=0 max=1000000 name=video_qr_size value="{field('video_qr_size')}"></label><label>QR recovery <select name=video_qr_recovery>{''.join(f'<option value={item}{" selected" if values.get("video_qr_recovery") == item else ""}>{item}</option>' for item in ("low", "medium", "high", "highest"))}</select></label><label>Tile module <input required type=number min=1 max=270 name=video_tile_module value="{field('video_tile_module')}"></label><label>Tile RS <input required type=number min=0 max=200 name=video_tile_rs value="{field('video_tile_rs')}"></label></div><label><input type=checkbox name=rotate_key> Создать новый ключ (старый ключ перестанет работать)</label><p><button>Проверить и сохранить</button></p></form><p>Ключ создаётся на VPS в <code>/etc/olcrtc-native/&lt;instance&gt;.key</code> и в браузер не выводится. Transport-параметры попадут в Spec URI. Traffic-поля нужно повторить на клиенте.</p>'''
 
     def do_GET(self) -> None:
+        route = urlparse(self.path).path
+        if route.startswith("/sub/"):
+            slug = route[len("/sub/") :]
+            if not re.fullmatch(r"[A-Za-z0-9_-]{43}", slug):
+                self.send_error(404)
+                return
+            try:
+                settings = admin_settings()
+                name = settings["subscriptions"].get(hashlib.sha256(slug.encode("ascii")).hexdigest())
+                if not isinstance(name, str):
+                    raise ValueError("subscription not found")
+                contents = spec_uri(name, True) + "\n"
+            except (OSError, ValueError, KeyError):
+                self.send_error(404)
+                return
+            encoded = contents.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
         if not self.authenticate():
             return
-        route = urlparse(self.path).path
         if route == "/qr":
             token = parse_qs(urlparse(self.path).query).get("token", [""])[0]
             uri = QR_VALUES.pop(token, None)
@@ -615,6 +677,19 @@ class Handler(BaseHTTPRequestHandler):
                     items.append(f"<li><code>{html.escape(path.name)}</code>{restore}</li>")
             listing = "".join(items) or "<li>Резервных копий пока нет.</li>"
             self.send_html("Резервные копии", f"<div class=card><p>Копии хранятся локально в <code>{html.escape(str(BACKUP_DIR))}</code> с правами root.</p><ul>{listing}</ul></div>")
+            return
+        if route == "/subscriptions":
+            try:
+                settings = admin_settings()
+            except ValueError as exc:
+                self.send_html("Подписки", f"<p class=bad>{html.escape(str(exc))}</p>", 500)
+                return
+            subscriptions = settings["subscriptions"]
+            active = sorted(set(subscriptions.values())) if isinstance(subscriptions, dict) else []
+            listing = "".join(f'''<li><strong>{html.escape(name)}</strong><form style="display:inline" method=post action=/subscription-revoke><input type=hidden name=csrf value="{CSRF_TOKEN}"><input type=hidden name=instance value="{html.escape(name, quote=True)}"><button class=danger>Отозвать все ссылки</button></form></li>''' for name in active) or "<li>Активных ссылок нет.</li>"
+            options = "".join(f'<option value="{html.escape(name, quote=True)}">{html.escape(name)}</option>' for name, _active, _enabled, owned in instances() if owned)
+            base = html.escape(str(settings["public_base_url"]), quote=True)
+            self.send_html("Подписки", f'''<div class=card><p>Полный slug показывается один раз. На диске хранится только SHA-256, поэтому потерянную ссылку нужно перевыпустить.</p><ul>{listing}</ul><form method=post action=/subscription-create><input type=hidden name=csrf value="{CSRF_TOKEN}"><label>Инстанс <select required name=instance>{options}</select></label><button>Создать новую ссылку</button></form></div><div class=card><h2>Публичный URL</h2><form method=post action=/save-public-url><input type=hidden name=csrf value="{CSRF_TOKEN}"><label>HTTPS origin <input name=public_base_url placeholder="https://vpn.example.com:8443" value="{base}"></label><button>Сохранить</button></form><p class=muted>Это меняет только адрес создаваемых ссылок. DNS и TLS-сертификат настраиваются отдельно.</p></div>''')
             return
         if route == "/legacy":
             found = legacy_report()
@@ -707,6 +782,45 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html("Восстановление не выполнено", f"<p class=bad>{html.escape(str(exc))}</p>", 400)
                 return
             self.send_html("Копия восстановлена", f"<p class=ok>{html.escape(name)} восстановлен из проверенной локальной копии.</p>{self.actions(name)}")
+            return
+        if route == "/subscription-create":
+            try:
+                name = instance_name(values.get("instance", ""))
+                if managed_config(name) is None:
+                    raise ValueError("subscription requires a UI-managed instance")
+                settings = admin_settings()
+                subscriptions = dict(settings["subscriptions"])
+                slug = secrets.token_urlsafe(32)
+                subscriptions[hashlib.sha256(slug.encode("ascii")).hexdigest()] = name
+                settings["subscriptions"] = subscriptions
+                save_admin_settings(settings)
+                base = str(settings["public_base_url"])
+                link = (base if base else "https://SERVER_IP:8443") + "/sub/" + slug
+            except (OSError, ValueError, KeyError) as exc:
+                self.send_html("Ссылка не создана", f"<p class=bad>{html.escape(str(exc))}</p>", 400)
+                return
+            self.send_html("Ссылка создана", f"<p class=warn>Скопируйте сейчас. Повторно полный адрес не показывается.</p><pre>{html.escape(link)}</pre><p>Эта ссылка даёт доступ к ключу инстанса. Не публикуйте её.</p>")
+            return
+        if route == "/subscription-revoke":
+            try:
+                name = instance_name(values.get("instance", ""))
+                settings = admin_settings()
+                settings["subscriptions"] = {digest: target for digest, target in dict(settings["subscriptions"]).items() if target != name}
+                save_admin_settings(settings)
+            except (OSError, ValueError, KeyError) as exc:
+                self.send_html("Ссылка не отозвана", f"<p class=bad>{html.escape(str(exc))}</p>", 400)
+                return
+            self.send_html("Ссылки отозваны", f"<p class=ok>Все подписки {html.escape(name)} отозваны.</p><p><a href=/subscriptions>Назад</a></p>")
+            return
+        if route == "/save-public-url":
+            try:
+                settings = admin_settings()
+                settings["public_base_url"] = public_base_url(values.get("public_base_url", ""))
+                save_admin_settings(settings)
+            except (OSError, ValueError, KeyError) as exc:
+                self.send_html("URL не сохранён", f"<p class=bad>{html.escape(str(exc))}</p>", 400)
+                return
+            self.send_html("Публичный URL сохранён", "<p class=ok>Новые подписки будут использовать этот HTTPS origin.</p><p><a href=/subscriptions>Назад</a></p>")
             return
         if route == "/clone":
             try:

@@ -142,5 +142,31 @@ class RedactionTests(unittest.TestCase):
         self.assertNotIn("abc", output)
 
 
+class AdminSettingsTests(unittest.TestCase):
+    """Public URL and hashed subscription state."""
+
+    # ai-generated: accept only a plain HTTPS origin for generated links.
+    def test_public_base_url(self) -> None:
+        self.assertEqual(ADMIN.public_base_url("https://vpn.example.org:8443/"), "https://vpn.example.org:8443")
+        for value in ("http://vpn.example.org", "https://user@vpn.example.org", "https://vpn.example.org/path", "https://vpn.example.org/?token=x"):
+            with self.assertRaises(ValueError):
+                ADMIN.public_base_url(value)
+
+    # ai-generated: persist a subscription index containing only one-way slug hashes.
+    def test_admin_settings_round_trip(self) -> None:
+        original = ADMIN.ADMIN_SETTINGS_PATH
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                ADMIN.ADMIN_SETTINGS_PATH = Path(directory) / "admin.json"
+                digest = "a" * 64
+                payload = {"schema": 1, "public_base_url": "https://vpn.example.org", "subscriptions": {digest: "main"}}
+                ADMIN.save_admin_settings(payload)
+                loaded = ADMIN.admin_settings()
+                self.assertEqual(loaded, payload)
+                self.assertNotIn("raw-subscription-slug", ADMIN.ADMIN_SETTINGS_PATH.read_text())
+        finally:
+            ADMIN.ADMIN_SETTINGS_PATH = original
+
+
 if __name__ == "__main__":
     unittest.main()
