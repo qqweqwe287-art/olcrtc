@@ -49,8 +49,8 @@
 - Keenetic URI/manifest: 11 unit-тестов прошли;
 - Keenetic Web: 12 unit-тестов прошли;
 - Python syntax check прошёл;
-- предыдущий опубликованный commit прошёл основной CI и Fork packaging CI;
-- полный CI текущего набора изменений будет запущен после публикации checkpoint.
+- последний функциональный checkpoint прошёл Fork packaging CI: ShellCheck, dash, BusyBox ash, оба bundle и Python;
+- основной CI также прошёл: lint, race/coverage, fmt/tidy/vet, Android, CLI, shared library и реальная E2E-матрица провайдеров.
 
 ### Следующий этап
 
