@@ -16,6 +16,12 @@ awk '
     copying && /^}/ { exit }
 ' "$ROOT/packaging/debian/install-server.sh" >"$TMP_ROOT/install-config-function.sh"
 
+awk '
+    /^prepare_v011_migration\(\) \{/ { copying = 1 }
+    copying { print }
+    copying && /^}/ { exit }
+' "$ROOT/packaging/debian/install-server.sh" >>"$TMP_ROOT/install-config-function.sh"
+
 cat >>"$TMP_ROOT/install-config-function.sh" <<'EOF'
 mkdir() { :; }
 chown() { :; }
@@ -33,6 +39,8 @@ INSTANCE=main
 REPLACE_CONFIG=0
 
 install_config
+MIGRATE_V011=0
+prepare_v011_migration
 EOF
 
 sh "$TMP_ROOT/install-config-function.sh"
