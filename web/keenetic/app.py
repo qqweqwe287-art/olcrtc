@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import threading
@@ -44,6 +45,7 @@ JSON_SECRET_RE = re.compile(
 LAN_NETWORKS = tuple(
     ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
+CLIENT_STATE_DIR = Path("/opt/var/lib/olcrtc-keenetic")
 
 
 @dataclass(frozen=True)
@@ -188,6 +190,16 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             self._json({"ok": True, "profile": profile})
             return
+        if self.path == "/api/backups":
+            if not self._require_auth():
+                return
+            backup_dir = CLIENT_STATE_DIR / "backups"
+            try:
+                names = [path.name for path in sorted(backup_dir.iterdir(), reverse=True) if path.is_dir() and not path.is_symlink() and re.fullmatch(r"[A-Za-z0-9_.-]{3,160}", path.name)]
+            except FileNotFoundError:
+                names = []
+            self._json({"ok": True, "backups": names[:50]})
+            return
         self._json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
     # ai-generated: route mutating HTTP requests with origin and CSRF checks.
@@ -220,6 +232,12 @@ class ControlHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/change-credentials":
             self._change_credentials(payload)
+            return
+        if self.path == "/api/backup":
+            self._backup()
+            return
+        if self.path == "/api/restore":
+            self._restore(payload)
             return
         self._json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
@@ -329,6 +347,39 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._json({"error": "credential_update_failed"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         self._clear_cookie()
+
+    # ai-generated: create a protected local copy of the managed client profile and key.
+    def _backup(self) -> None:
+        try:
+            destination = backup_client(Path(self._state().settings.client_config), CLIENT_STATE_DIR, "manual")
+        except (OSError, ValueError) as error:
+            self._json({"error": "backup_failed", "detail": redact(str(error))}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._json({"ok": True, "backup": destination.name})
+
+    # ai-generated: restore a selected local copy and automatically return on failed restart.
+    def _restore(self, payload: dict[str, Any]) -> None:
+        name = str(payload.get("backup", ""))
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{3,160}", name):
+            self._json({"error": "backup_name_invalid"}, HTTPStatus.BAD_REQUEST)
+            return
+        settings = self._state().settings
+        config = Path(settings.client_config)
+        selected = CLIENT_STATE_DIR / "backups" / name
+        rollback: Path | None = None
+        try:
+            rollback = backup_client(config, CLIENT_STATE_DIR, "before-restore")
+            run_command([settings.client_service, "stop"], 20)
+            restore_client(config, CLIENT_STATE_DIR, selected)
+            ok, output = run_command([settings.client_service, "start"], 30)
+            if not ok:
+                restore_client(config, CLIENT_STATE_DIR, rollback)
+                run_command([settings.client_service, "start"], 30)
+                raise ValueError("restored client failed to start; previous files were restored: " + output)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            self._json({"error": "restore_failed", "detail": redact(str(error))}, HTTPStatus.BAD_GATEWAY)
+            return
+        self._json({"ok": True, "backup": selected.name})
 
     # ai-generated: combine process, SOCKS and diagnostic status.
     def _status_payload(self) -> dict[str, Any]:
@@ -529,6 +580,65 @@ def atomic_json(path: Path, payload: dict[str, Any], mode: int) -> None:
         temporary.unlink(missing_ok=True)
 
 
+# ai-generated: enumerate only files owned by one managed Keenetic client configuration.
+def client_files(config_path: Path) -> list[Path]:
+    directory = config_path.parent
+    candidates = [config_path, directory / "profile.json", *sorted(directory.glob("secret-*.key"))]
+    return [path for path in candidates if path.is_file() and not path.is_symlink()]
+
+
+# ai-generated: create a checksummed root-only client backup under the package state directory.
+def backup_client(config_path: Path, state_dir: Path, reason: str) -> Path:
+    if not re.fullmatch(r"[a-z-]{3,32}", reason):
+        raise ValueError("invalid backup reason")
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + secrets.token_hex(3)
+    destination = state_dir / "backups" / f"client-{reason}-{stamp}"
+    destination.mkdir(parents=True, mode=0o700)
+    records: list[dict[str, str]] = []
+    for source in client_files(config_path):
+        target = destination / source.name
+        shutil.copy2(source, target, follow_symlinks=False)
+        os.chmod(target, 0o600)
+        records.append({"name": source.name, "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
+    atomic_json(destination / "backup.json", {"schema": 1, "kind": "keenetic-client", "reason": reason, "files": records}, 0o600)
+    return destination
+
+
+# ai-generated: verify hashes and atomically restore only the managed client files.
+def restore_client(config_path: Path, state_dir: Path, backup: Path) -> None:
+    root = state_dir / "backups"
+    if backup.parent != root or not backup.is_dir() or backup.is_symlink():
+        raise ValueError("backup path is invalid")
+    metadata = json.loads((backup / "backup.json").read_text(encoding="utf-8"))
+    if not isinstance(metadata, dict) or metadata.get("schema") != 1 or metadata.get("kind") != "keenetic-client":
+        raise ValueError("backup metadata is invalid")
+    records = metadata.get("files")
+    if not isinstance(records, list):
+        raise ValueError("backup file list is invalid")
+    allowed = {config_path.name, "profile.json"}
+    verified: list[Path] = []
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {"name", "sha256"}:
+            raise ValueError("backup record is invalid")
+        name, digest = record["name"], record["sha256"]
+        if not isinstance(name, str) or not isinstance(digest, str) or (name not in allowed and not re.fullmatch(r"secret-[0-9a-f]{12}\.key", name)):
+            raise ValueError("backup contains an unexpected file")
+        source = backup / name
+        if not source.is_file() or source.is_symlink() or not hmac.compare_digest(hashlib.sha256(source.read_bytes()).hexdigest(), digest):
+            raise ValueError("backup checksum mismatch")
+        verified.append(source)
+    directory = config_path.parent
+    for current in client_files(config_path):
+        current.unlink()
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    for source in verified:
+        target = directory / source.name
+        temporary = directory / f".{source.name}.{secrets.token_hex(4)}.tmp"
+        shutil.copy2(source, temporary, follow_symlinks=False)
+        os.chmod(temporary, 0o640)
+        os.replace(temporary, target)
+
+
 # ai-generated: load and validate persistent web settings.
 # ai-generated: permit only loopback or an explicitly enabled RFC1918 listener.
 def validate_bind_address(bind: str, allow_lan: bool) -> None:
@@ -665,15 +775,15 @@ INDEX_HTML = r"""<!doctype html>
 <section id="login" class="card"><h2>Вход</h2><div class="grid"><input id="user" value="admin" autocomplete="username"><input id="pass" type="password" placeholder="Пароль" autocomplete="current-password"></div><p><button id="loginBtn" class="primary">Войти</button> <span id="loginMsg" class="bad"></span></p></section>
 <div id="app" class="hidden"><section class="card"><div class="top"><h2>Состояние</h2><button id="refresh">Обновить</button></div><p id="health" class="muted">Проверка...</p><pre id="status"></pre><div class="row"><button data-action="start">Запустить</button><button data-action="restart">Перезапустить</button><button data-action="stop">Остановить</button><button data-action="probe">Проверить SOCKS</button><button data-action="diagnostics">Диагностика</button></div></section>
 <section class="card"><h2>Подключение</h2><p class="muted">Принимается только canonical olcrtc:// URI. Секрет не показывается повторно.</p><input id="uri" type="password" placeholder="olcrtc://..."><p><button id="importBtn" class="primary">Проверить и применить</button> <span id="importMsg"></span></p></section>
-<section class="card"><h2>Параметры клиента</h2><div class="grid"><label>Provider<select id="provider"><option>jitsi</option><option>telemost</option><option>wbstream</option></select></label><label>Transport<select id="transport"><option>datachannel</option><option>vp8channel</option><option>seichannel</option><option>videochannel</option></select></label><label>Комната<input id="room" placeholder="https://meet.example/room"></label></div><p><button id="loadProfile">Загрузить</button> <button id="saveProfile" class="primary">Сохранить</button> <span id="profileMsg"></span></p><p class="muted">Расширенные параметры transport сохраняются при импорте URI. Форма меняет основные совместимые поля, не показывая ключ.</p></section>
+<section class="card"><h2>Параметры клиента</h2><div class="grid"><label>Provider<select id="provider"><option>jitsi</option><option>telemost</option><option>wbstream</option></select></label><label>Transport<select id="transport"><option>datachannel</option><option>vp8channel</option><option>seichannel</option><option>videochannel</option></select></label><label>Комната<input id="room" placeholder="https://meet.example/room"></label><label>DNS<input id="dns" value="8.8.8.8:53"></label><label>SOCKS host<input id="socks_host" value="127.0.0.1"></label><label>SOCKS port<input id="socks_port" type="number" min="1" max="65535" value="8808"></label><label>Liveness interval<input id="liveness_interval" value="10s"></label><label>Liveness timeout<input id="liveness_timeout" value="15s"></label><label>Ошибок до reconnect<input id="liveness_failures" type="number" min="1" max="100" value="4"></label><label>Макс. время сессии<input id="max_session_duration" value="6h"></label><label>Traffic max payload<input id="traffic_max_payload" type="number" min="0" max="1048576" value="0"></label><label>Traffic min delay<input id="traffic_min_delay" placeholder="например 5ms"></label><label>Traffic max delay<input id="traffic_max_delay" placeholder="например 30ms"></label><label>Debug<select id="debug"><option value="false">выключен</option><option value="true">включён</option></select></label></div><h3>Transport</h3><div class="grid" id="transportFields"><label>FPS<input id="transport_fps" type="number" min="1" max="240" value="30"></label><label>Batch<input id="transport_batch" type="number" min="1" max="1000000" value="64"></label><label>Fragment<input id="transport_frag" type="number" min="1" max="60000" value="900"></label><label>ACK, мс<input id="transport_ack" type="number" min="1" max="3600000" value="2000"></label><label>Video width<input id="video_w" type="number" min="16" max="8192" value="1080"></label><label>Video height<input id="video_h" type="number" min="16" max="8192" value="1080"></label><label>Video codec<select id="video_codec"><option>qrcode</option><option>tile</option></select></label></div><p><button id="loadProfile">Загрузить</button> <button id="saveProfile" class="primary">Проверить и сохранить</button> <span id="profileMsg"></span></p><p class="muted">Ключ не передаётся в браузер. Перед записью все поля проверяются, конфигурация заменяется атомарно.</p></section>
 <section class="card"><h2>Миграция и обновление</h2><p class="muted">Если старый клиент занимает SOCKS-порт, используйте «Переключить». При ошибке старая служба запускается обратно. Удаление доступно только после успешного переключения и создаёт локальную копию.</p><div class="row"><button data-action="enable-native">Включить новый</button><button data-action="cutover" class="primary">Переключить со старого</button><button data-action="legacy-rollback">Вернуть старый</button><button data-action="update">Обновить</button><button data-action="binary-rollback">Откатить бинарник</button><button data-action="purge-legacy" class="danger">Удалить старый клиент</button></div></section>
+<section class="card"><h2>Резервные копии</h2><p class="muted">Полная локальная копия содержит ключ и доступна только root. Перед восстановлением автоматически создаётся ещё одна копия текущего состояния.</p><div class="row"><button id="backupBtn">Создать копию</button><select id="backupList"><option value="">Копий пока нет</option></select><button id="restoreBtn" class="danger">Восстановить выбранную</button></div><p id="backupMsg"></p></section>
 <section class="card"><h2>Безопасность панели</h2><div class="grid"><label>Новый логин<input id="newUser" value="admin" autocomplete="username"></label><label>Новый пароль<input id="newPass" type="password" minlength="12" autocomplete="new-password"></label><label>Повторите пароль<input id="newConfirm" type="password" minlength="12" autocomplete="new-password"></label></div><p><button id="credentialsBtn" class="primary">Сменить логин и пароль</button> <span id="credentialsMsg"></span></p><p class="muted">После смены все активные сессии будут завершены.</p></section>
 <section class="card"><div class="top"><h2>Журнал</h2><button id="logsBtn">Обновить</button></div><pre id="logs"></pre></section></div>
 <script>
-let csrf='';const q=s=>document.querySelector(s);async function api(path,options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const j=await r.json();if(!r.ok)throw new Error(j.error||'request_failed');return j}async function session(){const s=await api('/api/session');if(s.authenticated){csrf=s.csrf;q('#login').classList.add('hidden');q('#app').classList.remove('hidden');q('#logout').classList.remove('hidden');await refresh()}}async function refresh(){const j=await api('/api/status');q('#health').textContent=j.ok?'Туннель готов':'Требуется внимание';q('#health').className=j.ok?'ok':'bad';q('#status').textContent=JSON.stringify(j,null,2)}async function loadProfile(){try{const j=await api('/api/profile');if(!j.ok||!j.profile)throw new Error(j.output||'Сначала импортируйте URI');q('#provider').value=j.profile.provider;q('#transport').value=j.profile.transport;q('#room').value=j.profile.room;q('#profileMsg').textContent='Загружено'}catch(e){q('#profileMsg').textContent=e.message}}q('#loginBtn').onclick=async()=>{try{const j=await api('/api/login',{method:'POST',body:JSON.stringify({username:q('#user').value,password:q('#pass').value})});csrf=j.csrf;q('#pass').value='';await session()}catch(e){q('#loginMsg').textContent=e.message}};q('#refresh').onclick=refresh;q('#logsBtn').onclick=async()=>{const j=await api('/api/logs');q('#logs').textContent=j.output};document.querySelectorAll('[data-action]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{if(b.dataset.action==='purge-legacy'&&!confirm('Удалить старый клиент после создания резервной копии?'))return;const j=await api('/api/action',{method:'POST',body:JSON.stringify({csrf,action:b.dataset.action})});q('#status').textContent=j.output;await refresh()}catch(e){q('#status').textContent=e.message}finally{b.disabled=false}});q('#importBtn').onclick=async()=>{try{const j=await api('/api/import-uri',{method:'POST',body:JSON.stringify({csrf,uri:q('#uri').value})});q('#uri').value='';q('#importMsg').textContent=j.output||'Применено';await loadProfile();await refresh()}catch(e){q('#importMsg').textContent=e.message}};q('#loadProfile').onclick=loadProfile;q('#saveProfile').onclick=async()=>{try{const current=await api('/api/profile');const selected=q('#transport').value;const parameters=current.profile&&current.profile.transport===selected&&current.profile.parameters?current.profile.parameters:{};const profile={provider:q('#provider').value,transport:selected,room:q('#room').value,parameters};const j=await api('/api/settings',{method:'POST',body:JSON.stringify({csrf,profile})});q('#profileMsg').textContent=j.output||'Сохранено'}catch(e){q('#profileMsg').textContent=e.message}};q('#credentialsBtn').onclick=async()=>{try{await api('/api/change-credentials',{method:'POST',body:JSON.stringify({csrf,username:q('#newUser').value,password:q('#newPass').value,confirmation:q('#newConfirm').value})});location.reload()}catch(e){q('#credentialsMsg').textContent=e.message}};q('#logout').onclick=async()=>{await api('/api/logout',{method:'POST',body:JSON.stringify({csrf})});location.reload()};session();
+let csrf='';const q=s=>document.querySelector(s);const optionIds=['dns','socks_host','socks_port','liveness_interval','liveness_timeout','liveness_failures','max_session_duration','traffic_max_payload','traffic_min_delay','traffic_max_delay','debug'];async function api(path,options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.error||'request_failed');return j}async function session(){const s=await api('/api/session');if(s.authenticated){csrf=s.csrf;q('#login').classList.add('hidden');q('#app').classList.remove('hidden');q('#logout').classList.remove('hidden');await refresh();await loadBackups()}}async function refresh(){const j=await api('/api/status');q('#health').textContent=j.ok?'Туннель готов':'Требуется внимание';q('#health').className=j.ok?'ok':'bad';q('#status').textContent=JSON.stringify(j,null,2)}async function loadBackups(){const j=await api('/api/backups');q('#backupList').innerHTML=j.backups.length?j.backups.map(x=>`<option value="${x}">${x}</option>`).join(''):'<option value="">Копий пока нет</option>'}function putParameters(p){q('#transport_fps').value=p['vp8-fps']||p.fps||30;q('#transport_batch').value=p['vp8-batch']||p.batch||64;q('#transport_frag').value=p.frag||900;q('#transport_ack').value=p['ack-ms']||2000;q('#video_w').value=p['video-w']||1080;q('#video_h').value=p['video-h']||1080;q('#video_codec').value=p['video-codec']||'qrcode'}function getParameters(t){if(t==='vp8channel')return {'vp8-fps':q('#transport_fps').value,'vp8-batch':q('#transport_batch').value};if(t==='seichannel')return {fps:q('#transport_fps').value,batch:q('#transport_batch').value,frag:q('#transport_frag').value,'ack-ms':q('#transport_ack').value};if(t==='videochannel')return {'video-w':q('#video_w').value,'video-h':q('#video_h').value,'video-fps':q('#transport_fps').value,'video-codec':q('#video_codec').value};return {}}async function loadProfile(){try{const j=await api('/api/profile');if(!j.ok||!j.profile)throw new Error(j.output||'Сначала импортируйте URI');q('#provider').value=j.profile.provider;q('#transport').value=j.profile.transport;q('#room').value=j.profile.room;optionIds.forEach(id=>q('#'+id).value=j.profile.options[id]);putParameters(j.profile.parameters||{});q('#profileMsg').textContent='Загружено'}catch(e){q('#profileMsg').textContent=e.message}}q('#loginBtn').onclick=async()=>{try{const j=await api('/api/login',{method:'POST',body:JSON.stringify({username:q('#user').value,password:q('#pass').value})});csrf=j.csrf;q('#pass').value='';await session()}catch(e){q('#loginMsg').textContent=e.message}};q('#refresh').onclick=refresh;q('#logsBtn').onclick=async()=>{const j=await api('/api/logs');q('#logs').textContent=j.output};document.querySelectorAll('[data-action]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{if(b.dataset.action==='purge-legacy'&&!confirm('Удалить старый клиент после создания резервной копии?'))return;const j=await api('/api/action',{method:'POST',body:JSON.stringify({csrf,action:b.dataset.action})});q('#status').textContent=j.output;await refresh()}catch(e){q('#status').textContent=e.message}finally{b.disabled=false}});q('#importBtn').onclick=async()=>{try{const j=await api('/api/import-uri',{method:'POST',body:JSON.stringify({csrf,uri:q('#uri').value})});q('#uri').value='';q('#importMsg').textContent=j.output||'Применено';await loadProfile();await refresh()}catch(e){q('#importMsg').textContent=e.message}};q('#loadProfile').onclick=loadProfile;q('#saveProfile').onclick=async()=>{try{const selected=q('#transport').value;const options={};optionIds.forEach(id=>options[id]=q('#'+id).value);const profile={provider:q('#provider').value,transport:selected,room:q('#room').value,parameters:getParameters(selected),options};const j=await api('/api/settings',{method:'POST',body:JSON.stringify({csrf,profile})});q('#profileMsg').textContent=j.output||'Сохранено';await loadProfile()}catch(e){q('#profileMsg').textContent=e.message}};q('#backupBtn').onclick=async()=>{try{const j=await api('/api/backup',{method:'POST',body:JSON.stringify({csrf})});q('#backupMsg').textContent='Создана: '+j.backup;await loadBackups()}catch(e){q('#backupMsg').textContent=e.message}};q('#restoreBtn').onclick=async()=>{const backup=q('#backupList').value;if(!backup||!confirm('Остановить клиент и восстановить выбранную копию?'))return;try{await api('/api/restore',{method:'POST',body:JSON.stringify({csrf,backup})});q('#backupMsg').textContent='Восстановлено';await loadProfile();await refresh();await loadBackups()}catch(e){q('#backupMsg').textContent=e.message}};q('#credentialsBtn').onclick=async()=>{try{await api('/api/change-credentials',{method:'POST',body:JSON.stringify({csrf,username:q('#newUser').value,password:q('#newPass').value,confirmation:q('#newConfirm').value})});location.reload()}catch(e){q('#credentialsMsg').textContent=e.message}};q('#logout').onclick=async()=>{await api('/api/logout',{method:'POST',body:JSON.stringify({csrf})});location.reload()};session();
 </script></main></body></html>"""
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

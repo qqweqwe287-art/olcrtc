@@ -34,6 +34,7 @@ MANAGED_HEADER = "# Managed by olcRTC local admin UI."
 INSTANCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 DNS_RE = re.compile(r"[^\s:]+:\d{1,5}")
 RELEASE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
+DURATION_RE = re.compile(r"(?:0|[1-9][0-9]*)(?:ns|us|µs|ms|s|m|h)")
 PROVIDERS = {"jitsi", "telemost", "wbstream"}
 TRANSPORTS = {"datachannel", "vp8channel", "seichannel", "videochannel"}
 CSRF_TOKEN = secrets.token_urlsafe(32)
@@ -82,8 +83,44 @@ def instance_name(value: str) -> str:
     return value
 
 
+# ai-generated: validate a bounded single-unit Go duration used by the generated YAML.
+def duration_seconds(value: str, name: str, allow_empty: bool, minimum: float, maximum: float) -> float | None:
+    if not value and allow_empty:
+        return None
+    if not DURATION_RE.fullmatch(value):
+        raise ValueError(f"{name} must be a duration such as 10s, 500ms or 6h")
+    units = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
+    unit = next(item for item in units if value.endswith(item))
+    seconds = int(value[: -len(unit)]) * units[unit]
+    if seconds < minimum or seconds > maximum:
+        raise ValueError(f"{name} is outside the supported range")
+    return seconds
+
+
 # ai-generated: validate values accepted by the narrow generated server YAML schema.
 def config_values(values: dict[str, str]) -> dict[str, str]:
+    values = {
+        "liveness_interval": "10s",
+        "liveness_timeout": "15s",
+        "liveness_failures": "4",
+        "max_session_duration": "6h",
+        "traffic_max_payload": "0",
+        "traffic_min_delay": "",
+        "traffic_max_delay": "",
+        "debug": "false",
+        "transport_fps": "30",
+        "transport_batch": "64",
+        "transport_frag": "900",
+        "transport_ack": "2000",
+        "video_w": "1080",
+        "video_h": "1080",
+        "video_codec": "qrcode",
+        "video_qr_size": "1024",
+        "video_qr_recovery": "medium",
+        "video_tile_module": "8",
+        "video_tile_rs": "16",
+        **values,
+    }
     instance = instance_name(values.get("instance", ""))
     provider = values.get("provider", "")
     transport = values.get("transport", "")
@@ -103,7 +140,36 @@ def config_values(values: dict[str, str]) -> dict[str, str]:
             raise ValueError("Jitsi room must be a complete https://host/room URL")
     if provider == "wbstream" and transport == "datachannel":
         raise ValueError("wbstream/datachannel requires an account token and is unavailable in this safe UI")
-    return {"instance": instance, "provider": provider, "transport": transport, "room": room, "dns": dns}
+    failures = values["liveness_failures"]
+    payload = values["traffic_max_payload"]
+    if not failures.isascii() or not failures.isdigit() or not 1 <= int(failures) <= 100:
+        raise ValueError("liveness failures must be between 1 and 100")
+    if not payload.isascii() or not payload.isdigit() or not 0 <= int(payload) <= 1_048_576:
+        raise ValueError("traffic max payload must be between 0 and 1048576")
+    duration_seconds(values["liveness_interval"], "liveness interval", False, 1, 86400)
+    duration_seconds(values["liveness_timeout"], "liveness timeout", False, 1, 86400)
+    duration_seconds(values["max_session_duration"], "max session duration", False, 60, 604800)
+    minimum_delay = duration_seconds(values["traffic_min_delay"], "traffic min delay", True, 0, 60)
+    maximum_delay = duration_seconds(values["traffic_max_delay"], "traffic max delay", True, 0, 60)
+    if maximum_delay is not None and minimum_delay is None:
+        raise ValueError("traffic min delay is required when max delay is set")
+    if minimum_delay is not None and maximum_delay is not None and maximum_delay < minimum_delay:
+        raise ValueError("traffic max delay must not be lower than min delay")
+    if values["debug"] not in {"true", "false"}:
+        raise ValueError("debug must be true or false")
+    numeric_fields = (("transport_fps", 1, 240), ("transport_batch", 1, 1_000_000), ("transport_frag", 1, 60_000), ("transport_ack", 1, 3_600_000), ("video_w", 16, 8192), ("video_h", 16, 8192), ("video_qr_size", 0, 1_000_000), ("video_tile_module", 1, 270), ("video_tile_rs", 0, 200))
+    for name, minimum, maximum in numeric_fields:
+        value = values[name]
+        if not value.isascii() or not value.isdigit() or not minimum <= int(value) <= maximum:
+            raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    if values["video_codec"] not in {"qrcode", "tile"}:
+        raise ValueError("video codec must be qrcode or tile")
+    if values["video_qr_recovery"] not in {"low", "medium", "high", "highest"}:
+        raise ValueError("video QR recovery is invalid")
+    if transport == "videochannel" and values["video_codec"] == "tile" and (values["video_w"] != "1080" or values["video_h"] != "1080"):
+        raise ValueError("tile codec requires 1080x1080")
+    names = ("instance", "provider", "transport", "room", "dns", "liveness_interval", "liveness_timeout", "liveness_failures", "max_session_duration", "traffic_max_payload", "traffic_min_delay", "traffic_max_delay", "debug", "transport_fps", "transport_batch", "transport_frag", "transport_ack", "video_w", "video_h", "video_codec", "video_qr_size", "video_qr_recovery", "video_tile_module", "video_tile_rs")
+    return {name: values[name] for name in names}
 
 
 # ai-generated: quote a scalar through JSON-compatible YAML double-quoted syntax.
@@ -113,9 +179,18 @@ def yaml_string(value: str) -> str:
 
 # ai-generated: build the complete restricted server YAML managed by the UI.
 def config_text(values: dict[str, str]) -> str:
+    metadata = tuple(f"# ui.{name}={values[name]}" for name in ("transport_fps", "transport_batch", "transport_frag", "transport_ack", "video_w", "video_h", "video_codec", "video_qr_size", "video_qr_recovery", "video_tile_module", "video_tile_rs"))
+    transport: tuple[str, ...] = ()
+    if values["transport"] == "vp8channel":
+        transport = ("vp8:", f"  fps: {values['transport_fps']}", f"  batch_size: {values['transport_batch']}")
+    elif values["transport"] == "seichannel":
+        transport = ("sei:", f"  fps: {values['transport_fps']}", f"  batch_size: {values['transport_batch']}", f"  fragment_size: {values['transport_frag']}", f"  ack_timeout_ms: {values['transport_ack']}")
+    elif values["transport"] == "videochannel":
+        transport = ("video:", f"  width: {values['video_w']}", f"  height: {values['video_h']}", f"  fps: {values['transport_fps']}", f"  codec: {yaml_string(values['video_codec'])}", f"  qr_size: {values['video_qr_size']}", f"  qr_recovery: {yaml_string(values['video_qr_recovery'])}", f"  tile_module: {values['video_tile_module']}", f"  tile_rs: {values['video_tile_rs']}")
     return "\n".join(
         (
             MANAGED_HEADER,
+            *metadata,
             "mode: srv",
             "auth:",
             f"  provider: {values['provider']}",
@@ -127,12 +202,17 @@ def config_text(values: dict[str, str]) -> str:
             f"  transport: {values['transport']}",
             f"  dns: {yaml_string(values['dns'])}",
             "liveness:",
-            "  interval: 10s",
-            "  timeout: 15s",
-            "  failures: 4",
+            f"  interval: {values['liveness_interval']}",
+            f"  timeout: {values['liveness_timeout']}",
+            f"  failures: {values['liveness_failures']}",
             "lifecycle:",
-            "  max_session_duration: 6h",
-            "debug: false",
+            f"  max_session_duration: {values['max_session_duration']}",
+            "traffic:",
+            f"  max_payload_size: {values['traffic_max_payload']}",
+            *( (f"  min_delay: {values['traffic_min_delay']}",) if values["traffic_min_delay"] else () ),
+            *( (f"  max_delay: {values['traffic_max_delay']}",) if values["traffic_max_delay"] else () ),
+            *transport,
+            f"debug: {values['debug']}",
             "",
         )
     )
@@ -148,11 +228,23 @@ def managed_config(instance: str) -> dict[str, str] | None:
     if not lines or lines[0] != MANAGED_HEADER:
         return None
     found: dict[str, str] = {"instance": instance}
+    for line in lines[1:]:
+        metadata = re.fullmatch(r"# ui\.([a-z_]+)=([^\r\n]*)", line)
+        if metadata:
+            found[metadata.group(1)] = metadata.group(2)
     expressions = {
         "provider": r"^  provider: ([a-z]+)$",
         "room": r'^  id: "(.*)"$',
-        "transport": r"^  transport: ([a-z]+)$",
+        "transport": r"^  transport: ([a-z0-9]+)$",
         "dns": r'^  dns: "(.*)"$',
+        "liveness_interval": r"^  interval: ([0-9]+(?:ns|us|µs|ms|s|m|h))$",
+        "liveness_timeout": r"^  timeout: ([0-9]+(?:ns|us|µs|ms|s|m|h))$",
+        "liveness_failures": r"^  failures: ([0-9]+)$",
+        "max_session_duration": r"^  max_session_duration: ([0-9]+(?:ns|us|µs|ms|s|m|h))$",
+        "traffic_max_payload": r"^  max_payload_size: ([0-9]+)$",
+        "traffic_min_delay": r"^  min_delay: ([0-9]+(?:ns|us|µs|ms|s|m|h))$",
+        "traffic_max_delay": r"^  max_delay: ([0-9]+(?:ns|us|µs|ms|s|m|h))$",
+        "debug": r"^debug: (true|false)$",
     }
     for name, expression in expressions.items():
         for line in lines:
@@ -179,7 +271,15 @@ def spec_uri(instance: str, reveal: bool) -> str:
             raise ValueError(f"key is unavailable: {exc}") from exc
         if not re.fullmatch(r"[0-9a-f]{64}", key):
             raise ValueError("key file is invalid")
-    return f"olcrtc://{values['provider']}?{values['transport']}@{values['room']}#{key}$olcrtc"
+    parameter_names: dict[str, tuple[tuple[str, str], ...]] = {
+        "datachannel": (),
+        "vp8channel": (("vp8-fps", "transport_fps"), ("vp8-batch", "transport_batch")),
+        "seichannel": (("fps", "transport_fps"), ("batch", "transport_batch"), ("frag", "transport_frag"), ("ack-ms", "transport_ack")),
+        "videochannel": (("video-w", "video_w"), ("video-h", "video_h"), ("video-fps", "transport_fps"), ("video-codec", "video_codec"), ("video-qr-size", "video_qr_size"), ("video-qr-recovery", "video_qr_recovery"), ("video-tile-module", "video_tile_module"), ("video-tile-rs", "video_tile_rs")),
+    }
+    parameters = "&".join(f"{wire}={values[local]}" for wire, local in parameter_names[values["transport"]])
+    transport = values["transport"] + (f"<{parameters}>" if parameters else "")
+    return f"olcrtc://{values['provider']}?{transport}@{values['room']}#{key}$olcrtc"
 
 
 # ai-generated: render one short-lived URI as a bounded PNG without a shell.
@@ -225,13 +325,14 @@ def backup_instance(instance: str, reason: str) -> Path:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + secrets.token_hex(3)
     destination = BACKUP_DIR / f"{name}-{reason}-{stamp}"
     destination.mkdir(parents=True, mode=0o700)
-    copied: list[str] = []
+    copied: list[dict[str, str]] = []
     for suffix in (".yaml", ".key"):
         source = CONFIG_DIR / f"{name}{suffix}"
         if source.is_file() and not source.is_symlink():
             shutil.copy2(source, destination / source.name, follow_symlinks=False)
             os.chmod(destination / source.name, 0o600)
-            copied.append(source.name)
+            saved = destination / source.name
+            copied.append({"name": source.name, "sha256": hashlib.sha256(saved.read_bytes()).hexdigest()})
     atomic_write(
         destination / "backup.json",
         json.dumps({"schema": 1, "instance": name, "reason": reason, "files": copied}, ensure_ascii=False, indent=2) + "\n",
@@ -245,10 +346,26 @@ def restore_instance(instance: str, backup: Path) -> None:
     name = instance_name(instance)
     if backup.parent != BACKUP_DIR or not backup.is_dir() or backup.is_symlink():
         raise ValueError("invalid backup directory")
+    metadata = json.loads((backup / "backup.json").read_text(encoding="utf-8"))
+    if not isinstance(metadata, dict) or metadata.get("schema") != 1 or metadata.get("instance") != name:
+        raise ValueError("backup metadata does not match the instance")
+    records = metadata.get("files")
+    if not isinstance(records, list):
+        raise ValueError("backup file list is invalid")
+    expected: dict[str, str] = {}
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {"name", "sha256"} or not isinstance(record.get("name"), str) or not isinstance(record.get("sha256"), str):
+            raise ValueError("backup record is invalid")
+        if record["name"] not in {f"{name}.yaml", f"{name}.key"}:
+            raise ValueError("backup contains an unexpected file")
+        expected[record["name"]] = record["sha256"]
     for suffix in (".yaml", ".key"):
         saved = backup / f"{name}{suffix}"
         target = CONFIG_DIR / f"{name}{suffix}"
         if saved.is_file() and not saved.is_symlink():
+            digest = hashlib.sha256(saved.read_bytes()).hexdigest()
+            if not hmac.compare_digest(digest, expected.get(saved.name, "")):
+                raise ValueError("backup checksum mismatch")
             atomic_write(target, saved.read_text(encoding="utf-8"), 0o640)
         elif target.exists() and not target.is_symlink():
             target.unlink()
@@ -341,6 +458,17 @@ def instances() -> list[tuple[str, str, str, bool]]:
     return result
 
 
+# ai-generated: build one bounded redacted support report without configuration secrets.
+def diagnostic_text() -> str:
+    _, system = command("systemctl", "is-system-running", timeout=5)
+    binary = LIB_DIR / "current" / "olcrtc"
+    manifest = LIB_DIR / "current" / "manifest.tsv"
+    code, failed = command("systemctl", "--failed", "--no-pager", "--plain", timeout=10)
+    disk = shutil.disk_usage(STATE_DIR if STATE_DIR.exists() else Path("/"))
+    details = f"generated_utc: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\nsystemd: {system.strip()}\nbinary: {'present' if binary.is_file() else 'missing'}\nmanifest: {'present' if manifest.is_file() else 'missing'}\ninstances: {len(instances())}\ndisk_free_mib: {disk.free // 1024 // 1024}\nlegacy_objects: {len(legacy_report())}\n\nfailed units (code={code}):\n{failed}"
+    return redact(details)[:256 * 1024] + "\n"
+
+
 # ai-generated: authenticate the local operator using the root-readable generated credential.
 def authorized(header: str | None) -> bool:
     if not header or not header.startswith("Basic "):
@@ -386,13 +514,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def send_text(self, contents: str, filename: str) -> None:
+        encoded = contents.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
     def form(self, values: dict[str, str] | None = None, warning: str = "") -> str:
-        values = values or {"instance": "main", "provider": "jitsi", "transport": "datachannel", "room": "", "dns": "8.8.8.8:53"}
+        values = values or {"instance": "main", "provider": "jitsi", "transport": "datachannel", "room": "", "dns": "8.8.8.8:53", "liveness_interval": "10s", "liveness_timeout": "15s", "liveness_failures": "4", "max_session_duration": "6h", "traffic_max_payload": "0", "traffic_min_delay": "", "traffic_max_delay": "", "debug": "false", "transport_fps": "30", "transport_batch": "64", "transport_frag": "900", "transport_ack": "2000", "video_w": "1080", "video_h": "1080", "video_codec": "qrcode", "video_qr_size": "1024", "video_qr_recovery": "medium", "video_tile_module": "8", "video_tile_rs": "16"}
         def field(name: str) -> str:
             return html.escape(values.get(name, ""), quote=True)
         provider_options = "".join(f'<option value="{name}"{" selected" if values.get("provider") == name else ""}>{name}</option>' for name in sorted(PROVIDERS))
         transport_options = "".join(f'<option value="{name}"{" selected" if values.get("transport") == name else ""}>{name}</option>' for name in sorted(TRANSPORTS))
-        return f'''<p class=warn>{html.escape(warning)}</p><form method=post action=/save><input type=hidden name=csrf value="{CSRF_TOKEN}"><label>Инстанс <input required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{{0,63}}" name=instance value="{field('instance')}"></label><label>Provider <select name=provider>{provider_options}</select></label><label>Transport <select name=transport>{transport_options}</select></label><label>Комната / URL <input required name=room size=46 value="{field('room')}"></label><label>DNS <input required name=dns value="{field('dns')}"></label><label><input type=checkbox name=rotate_key> Создать новый ключ (старый ключ перестанет работать)</label><button>Сохранить валидную конфигурацию</button></form><p>Ключ создаётся на VPS в <code>/etc/olcrtc-native/&lt;instance&gt;.key</code> и в браузер не выводится.</p>'''
+        debug_options = f'<option value="false"{" selected" if values.get("debug") == "false" else ""}>выключен</option><option value="true"{" selected" if values.get("debug") == "true" else ""}>включён</option>'
+        return f'''<p class=warn>{html.escape(warning)}</p><form method=post action=/save><input type=hidden name=csrf value="{CSRF_TOKEN}"><div class=grid><label>Инстанс <input required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{{0,63}}" name=instance value="{field('instance')}"></label><label>Provider <select name=provider>{provider_options}</select></label><label>Transport <select name=transport>{transport_options}</select></label><label>Комната / URL <input required name=room value="{field('room')}"></label><label>DNS <input required name=dns value="{field('dns')}"></label><label>Liveness interval <input required name=liveness_interval value="{field('liveness_interval')}"></label><label>Liveness timeout <input required name=liveness_timeout value="{field('liveness_timeout')}"></label><label>Ошибок до reconnect <input required type=number min=1 max=100 name=liveness_failures value="{field('liveness_failures')}"></label><label>Макс. время сессии <input required name=max_session_duration value="{field('max_session_duration')}"></label><label>Traffic max payload <input required type=number min=0 max=1048576 name=traffic_max_payload value="{field('traffic_max_payload')}"></label><label>Traffic min delay <input name=traffic_min_delay placeholder="например 5ms" value="{field('traffic_min_delay')}"></label><label>Traffic max delay <input name=traffic_max_delay placeholder="например 30ms" value="{field('traffic_max_delay')}"></label><label>Debug <select name=debug>{debug_options}</select></label></div><h3>Transport</h3><div class=grid><label>FPS <input required type=number min=1 max=240 name=transport_fps value="{field('transport_fps')}"></label><label>Batch <input required type=number min=1 max=1000000 name=transport_batch value="{field('transport_batch')}"></label><label>SEI fragment <input required type=number min=1 max=60000 name=transport_frag value="{field('transport_frag')}"></label><label>SEI ACK, мс <input required type=number min=1 max=3600000 name=transport_ack value="{field('transport_ack')}"></label><label>Video width <input required type=number min=16 max=8192 name=video_w value="{field('video_w')}"></label><label>Video height <input required type=number min=16 max=8192 name=video_h value="{field('video_h')}"></label><label>Video codec <select name=video_codec><option value=qrcode{" selected" if values.get("video_codec") == "qrcode" else ""}>qrcode</option><option value=tile{" selected" if values.get("video_codec") == "tile" else ""}>tile</option></select></label><label>QR size <input required type=number min=0 max=1000000 name=video_qr_size value="{field('video_qr_size')}"></label><label>QR recovery <select name=video_qr_recovery>{''.join(f'<option value={item}{" selected" if values.get("video_qr_recovery") == item else ""}>{item}</option>' for item in ("low", "medium", "high", "highest"))}</select></label><label>Tile module <input required type=number min=1 max=270 name=video_tile_module value="{field('video_tile_module')}"></label><label>Tile RS <input required type=number min=0 max=200 name=video_tile_rs value="{field('video_tile_rs')}"></label></div><label><input type=checkbox name=rotate_key> Создать новый ключ (старый ключ перестанет работать)</label><p><button>Проверить и сохранить</button></p></form><p>Ключ создаётся на VPS в <code>/etc/olcrtc-native/&lt;instance&gt;.key</code> и в браузер не выводится. Transport-параметры попадут в Spec URI. Traffic-поля нужно повторить на клиенте.</p>'''
 
     def do_GET(self) -> None:
         if not self.authenticate():
@@ -452,20 +592,27 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(f"Spec URI {name}", f"<p>Секрет по умолчанию скрыт и QR-код не формируется.</p><pre>{html.escape(uri)}</pre><form method=post action=/reveal-uri><input type=hidden name=csrf value=\"{CSRF_TOKEN}\"><input type=hidden name=instance value=\"{html.escape(name, quote=True)}\"><label><input required type=checkbox name=acknowledge> Я понимаю, что ключ будет показан на экране</label><button>Показать URI и QR</button></form>")
             return
         if route == "/diagnostics":
-            _, system = command("systemctl", "is-system-running", timeout=5)
-            binary = LIB_DIR / "current" / "olcrtc"
-            manifest = LIB_DIR / "current" / "manifest.tsv"
-            code, failed = command("systemctl", "--failed", "--no-pager", "--plain", timeout=10)
-            disk = shutil.disk_usage(STATE_DIR if STATE_DIR.exists() else Path("/"))
-            details = f"systemd: {system.strip()}\nбинарник: {'есть' if binary.is_file() else 'не найден'}\nmanifest: {'есть' if manifest.is_file() else 'не найден'}\nинстансов: {len(instances())}\nсвободно: {disk.free // 1024 // 1024} MiB\nстарый Manager: {len(legacy_report())} объектов\n\nfailed units (code={code}):\n{redact(failed)}"
-            self.send_html("Диагностика", f"<div class=card><p>Отчёт не содержит ключи и пароли.</p><pre>{html.escape(details)}</pre></div>")
+            details = diagnostic_text()
+            self.send_html("Диагностика", f"<div class=card><p>Отчёт не содержит ключи и пароли. <a href=/diagnostics.txt>Скачать TXT</a></p><pre>{html.escape(details)}</pre></div>")
+            return
+        if route == "/diagnostics.txt":
+            self.send_text(diagnostic_text(), "olcrtc-diagnostics.txt")
             return
         if route == "/backups":
             BACKUP_DIR.mkdir(parents=True, exist_ok=True)
             items = []
             for path in sorted(BACKUP_DIR.iterdir(), reverse=True):
                 if path.is_dir() and not path.is_symlink():
-                    items.append(f"<li><code>{html.escape(path.name)}</code></li>")
+                    metadata_path = path / "backup.json"
+                    try:
+                        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        metadata = {}
+                    name = metadata.get("instance") if isinstance(metadata, dict) else None
+                    restore = ""
+                    if isinstance(name, str):
+                        restore = f'''<form method=post action=/restore><input type=hidden name=csrf value="{CSRF_TOKEN}"><input type=hidden name=instance value="{html.escape(name, quote=True)}"><input type=hidden name=backup value="{html.escape(path.name, quote=True)}"><button>Восстановить</button></form>'''
+                    items.append(f"<li><code>{html.escape(path.name)}</code>{restore}</li>")
             listing = "".join(items) or "<li>Резервных копий пока нет.</li>"
             self.send_html("Резервные копии", f"<div class=card><p>Копии хранятся локально в <code>{html.escape(str(BACKUP_DIR))}</code> с правами root.</p><ul>{listing}</ul></div>")
             return
@@ -535,6 +682,31 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html("Ошибка", f"<p>{html.escape(str(exc))}</p>", 400)
                 return
             self.send_html("Операция службы", f"<p>{html.escape(action)}: {'готово' if code == 0 else 'ошибка'}</p><pre>{html.escape(redact(output))}</pre>{self.actions(name)}")
+            return
+        if route == "/restore":
+            rollback: Path | None = None
+            try:
+                name = instance_name(values.get("instance", ""))
+                backup_name = values.get("backup", "")
+                if not re.fullmatch(r"[A-Za-z0-9_.-]{3,160}", backup_name):
+                    raise ValueError("invalid backup name")
+                selected = BACKUP_DIR / backup_name
+                metadata = json.loads((selected / "backup.json").read_text(encoding="utf-8"))
+                if not isinstance(metadata, dict) or metadata.get("schema") != 1 or metadata.get("instance") != name:
+                    raise ValueError("backup metadata does not match the instance")
+                rollback = backup_instance(name, "before-restore")
+                restore_instance(name, selected)
+                was_active = unit_state(name)[0] == "active"
+                if was_active:
+                    code, output = command("systemctl", "restart", f"{UNIT_PREFIX}{name}.service", timeout=30)
+                    if code != 0 or unit_state(name)[0] != "active":
+                        restore_instance(name, rollback)
+                        command("systemctl", "restart", f"{UNIT_PREFIX}{name}.service", timeout=30)
+                        raise ValueError("restored configuration failed to start; rollback restored: " + redact(output))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                self.send_html("Восстановление не выполнено", f"<p class=bad>{html.escape(str(exc))}</p>", 400)
+                return
+            self.send_html("Копия восстановлена", f"<p class=ok>{html.escape(name)} восстановлен из проверенной локальной копии.</p>{self.actions(name)}")
             return
         if route == "/clone":
             try:
@@ -690,4 +862,3 @@ def verify_password(password: str, encoded: str) -> bool:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

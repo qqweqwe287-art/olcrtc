@@ -76,6 +76,33 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ADMIN.instance_name(value)
 
+    # ai-generated: validate and round-trip the shared liveness and traffic fields.
+    def test_expert_values_round_trip(self) -> None:
+        values = ADMIN.config_values({"instance": "main", "provider": "jitsi", "transport": "datachannel", "room": "https://meet.example.org/room", "dns": "1.1.1.1:53", "traffic_max_payload": "4096", "traffic_min_delay": "5ms", "traffic_max_delay": "30ms", "debug": "true"})
+        rendered = ADMIN.config_text(values)
+        self.assertIn("max_payload_size: 4096", rendered)
+        self.assertIn("max_delay: 30ms", rendered)
+        self.assertIn("debug: true", rendered)
+
+    # ai-generated: encode transport settings in the canonical client URI.
+    def test_transport_parameters_exported(self) -> None:
+        original = ADMIN.CONFIG_DIR
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                ADMIN.CONFIG_DIR = Path(directory)
+                values = ADMIN.config_values({"instance": "video", "provider": "jitsi", "transport": "vp8channel", "room": "https://meet.example.org/room", "dns": "1.1.1.1:53", "transport_fps": "25", "transport_batch": "80"})
+                ADMIN.atomic_write(ADMIN.CONFIG_DIR / "video.yaml", ADMIN.config_text(values), 0o640)
+                ADMIN.atomic_write(ADMIN.CONFIG_DIR / "video.key", "a" * 64 + "\n", 0o640)
+                uri = ADMIN.spec_uri("video", True)
+                self.assertIn("vp8channel<vp8-fps=25&vp8-batch=80>", uri)
+        finally:
+            ADMIN.CONFIG_DIR = original
+
+    # ai-generated: reject inverted traffic pacing before touching a config file.
+    def test_expert_values_reject_inverted_delay(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not be lower"):
+            ADMIN.config_values({"instance": "main", "provider": "jitsi", "transport": "datachannel", "room": "https://meet.example.org/room", "dns": "1.1.1.1:53", "traffic_min_delay": "30ms", "traffic_max_delay": "5ms"})
+
     # ai-generated: preserve and restore only the two fixed files for an instance.
     def test_backup_and_restore_instance(self) -> None:
         original_config = ADMIN.CONFIG_DIR
@@ -95,6 +122,9 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual((ADMIN.CONFIG_DIR / "main.key").read_text().strip(), "a" * 64)
                 metadata = (backup / "backup.json").read_text()
                 self.assertIn('"schema": 1', metadata)
+                (backup / "main.yaml").write_text("tampered\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "checksum"):
+                    ADMIN.restore_instance("main", backup)
         finally:
             ADMIN.CONFIG_DIR = original_config
             ADMIN.BACKUP_DIR = original_backup
@@ -114,4 +144,3 @@ class RedactionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

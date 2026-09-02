@@ -129,6 +129,7 @@ class UriTests(unittest.TestCase):
                 "transport": "vp8channel",
                 "room": "https://meet.example.org/changed-room",
                 "parameters": {"vp8-fps": "30", "vp8-batch": "64"},
+                "options": dict(URI.DEFAULT_OPTIONS),
             }
             updated = URI.connection_from_settings(settings, URI.read_current_key(config))
             URI.write_managed_config(config, profile, updated)
@@ -142,9 +143,28 @@ class UriTests(unittest.TestCase):
             "transport": "datachannel",
             "room": "https://meet.example.org/room-name",
             "parameters": {"vp8-fps": "30"},
+            "options": dict(URI.DEFAULT_OPTIONS),
         }
         with self.assertRaisesRegex(ValueError, "unsupported datachannel parameter"):
             URI.connection_from_settings(settings, "a" * 64)
+
+    # ai-generated: render validated common settings and traffic pacing into YAML.
+    def test_expert_options_rendered(self) -> None:
+        options = dict(URI.DEFAULT_OPTIONS)
+        options.update({"dns": "1.1.1.1:53", "traffic_max_payload": "4096", "traffic_min_delay": "5ms", "traffic_max_delay": "30ms", "debug": "true"})
+        connection = URI.Connection("jitsi", "datachannel", "https://meet.example.org/room", "e" * 64, {}, options)
+        rendered = URI.render_config(connection, "secret.key")
+        self.assertIn('dns: "1.1.1.1:53"', rendered)
+        self.assertIn("max_payload_size: 4096", rendered)
+        self.assertIn("max_delay: 30ms", rendered)
+        self.assertIn("debug: true", rendered)
+
+    # ai-generated: reject a pacing range that would be invalid upstream.
+    def test_expert_options_reject_inverted_delay(self) -> None:
+        options = dict(URI.DEFAULT_OPTIONS)
+        options.update({"traffic_min_delay": "30ms", "traffic_max_delay": "5ms"})
+        with self.assertRaisesRegex(ValueError, "must not be lower"):
+            URI.validate_options(options)
 
 
 if __name__ == "__main__":

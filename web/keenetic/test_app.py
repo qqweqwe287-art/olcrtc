@@ -128,6 +128,39 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(list(path.parent.glob(".*.tmp")), [])
 
 
+class BackupTests(unittest.TestCase):
+    """Client backup integrity and allowlist behavior."""
+
+    # ai-generated: restore the managed files after verifying their checksums.
+    def test_backup_restore_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_dir = root / "etc"
+            state_dir = root / "state"
+            config_dir.mkdir()
+            config = config_dir / "client.yaml"
+            config.write_text("old yaml\n", encoding="utf-8")
+            (config_dir / "profile.json").write_text('{}\n', encoding="utf-8")
+            (config_dir / "secret-001122aabbcc.key").write_text("secret\n", encoding="ascii")
+            backup = APP.backup_client(config, state_dir, "manual")
+            config.write_text("changed\n", encoding="utf-8")
+            APP.restore_client(config, state_dir, backup)
+            self.assertEqual(config.read_text(encoding="utf-8"), "old yaml\n")
+            self.assertTrue((config_dir / "secret-001122aabbcc.key").is_file())
+
+    # ai-generated: reject a backup whose payload was modified after creation.
+    def test_backup_tamper_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_dir = root / "etc"
+            config_dir.mkdir()
+            config = config_dir / "client.yaml"
+            config.write_text("old\n", encoding="utf-8")
+            backup = APP.backup_client(config, root / "state", "manual")
+            (backup / "client.yaml").write_text("tampered\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                APP.restore_client(config, root / "state", backup)
+
+
 if __name__ == "__main__":
     unittest.main()
-

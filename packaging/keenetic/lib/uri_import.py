@@ -12,7 +12,7 @@ import re
 import secrets
 import stat
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -36,7 +36,35 @@ PARAMETERS = {
         "video-tile-rs",
     },
 }
-PROFILE_KEYS = {"schema", "provider", "transport", "room", "parameters"}
+PROFILE_KEYS_V1 = {"schema", "provider", "transport", "room", "parameters"}
+PROFILE_KEYS = PROFILE_KEYS_V1 | {"options"}
+OPTION_KEYS = {
+    "dns",
+    "socks_host",
+    "socks_port",
+    "liveness_interval",
+    "liveness_timeout",
+    "liveness_failures",
+    "max_session_duration",
+    "traffic_max_payload",
+    "traffic_min_delay",
+    "traffic_max_delay",
+    "debug",
+}
+DEFAULT_OPTIONS = {
+    "dns": "8.8.8.8:53",
+    "socks_host": "127.0.0.1",
+    "socks_port": "8808",
+    "liveness_interval": "10s",
+    "liveness_timeout": "15s",
+    "liveness_failures": "4",
+    "max_session_duration": "6h",
+    "traffic_max_payload": "0",
+    "traffic_min_delay": "",
+    "traffic_max_delay": "",
+    "debug": "false",
+}
+DURATION_RE = re.compile(r"(?:0|[1-9][0-9]*)(?:ns|us|µs|ms|s|m|h)")
 
 
 # ai-generated: parsed canonical URI fields.
@@ -47,6 +75,7 @@ class Connection:
     room: str
     key: str
     parameters: dict[str, str]
+    options: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_OPTIONS))
 
 
 # ai-generated: reject URI input that came from rendered Markdown or contains controls.
@@ -111,7 +140,7 @@ def parse_uri(value: str) -> Connection:
     validate_compatibility(provider, transport)
     parameters = parse_parameters(transport, payload)
     validate_parameters(transport, parameters)
-    return Connection(provider, transport, room, key.lower(), parameters)
+    return Connection(provider, transport, room, key.lower(), parameters, dict(DEFAULT_OPTIONS))
 
 
 # ai-generated: enforce a real Jitsi host and room instead of the invalid any placeholder.
@@ -183,6 +212,51 @@ def validate_parameters(transport: str, parameters: dict[str, str]) -> None:
             raise ValueError("tile codec requires 1080x1080 dimensions")
 
 
+# ai-generated: parse the single-unit Go durations exposed by the router UI.
+def duration_seconds(value: str, name: str, allow_empty: bool, minimum: float, maximum: float) -> float | None:
+    if not value and allow_empty:
+        return None
+    if not DURATION_RE.fullmatch(value):
+        raise ValueError(f"{name} must be a duration such as 10s, 500ms or 6h")
+    units = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1.0, "m": 60.0, "h": 3600.0}
+    unit = next(item for item in units if value.endswith(item))
+    number = int(value[: -len(unit)])
+    seconds = number * units[unit]
+    if seconds < minimum or seconds > maximum:
+        raise ValueError(f"{name} is outside the supported range")
+    return seconds
+
+
+# ai-generated: validate common client settings before rendering YAML.
+def validate_options(options: object) -> dict[str, str]:
+    if not isinstance(options, dict) or set(options) != OPTION_KEYS:
+        raise ValueError("options contain missing or unknown fields")
+    if not all(isinstance(name, str) and isinstance(value, str) for name, value in options.items()):
+        raise ValueError("options must be an object of strings")
+    result = dict(options)
+    dns = result["dns"]
+    if not re.fullmatch(r"[^\s:]+:[0-9]{1,5}", dns) or int(dns.rsplit(":", 1)[1]) not in range(1, 65536):
+        raise ValueError("dns must use host:port")
+    if result["socks_host"] not in {"127.0.0.1", "localhost"}:
+        raise ValueError("socks_host must be loopback")
+    for name, minimum, maximum in (("socks_port", 1, 65535), ("liveness_failures", 1, 100), ("traffic_max_payload", 0, 1_048_576)):
+        value = result[name]
+        if not value.isascii() or not value.isdigit() or not minimum <= int(value) <= maximum:
+            raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    duration_seconds(result["liveness_interval"], "liveness_interval", False, 1, 86400)
+    duration_seconds(result["liveness_timeout"], "liveness_timeout", False, 1, 86400)
+    duration_seconds(result["max_session_duration"], "max_session_duration", False, 60, 604800)
+    minimum_delay = duration_seconds(result["traffic_min_delay"], "traffic_min_delay", True, 0, 60)
+    maximum_delay = duration_seconds(result["traffic_max_delay"], "traffic_max_delay", True, 0, 60)
+    if maximum_delay is not None and minimum_delay is None:
+        raise ValueError("traffic_min_delay is required when traffic_max_delay is set")
+    if minimum_delay is not None and maximum_delay is not None and maximum_delay < minimum_delay:
+        raise ValueError("traffic_max_delay must not be lower than traffic_min_delay")
+    if result["debug"] not in {"true", "false"}:
+        raise ValueError("debug must be true or false")
+    return result
+
+
 # ai-generated: render JSON-quoted scalar values, which are valid YAML scalars.
 def quote(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
@@ -190,6 +264,7 @@ def quote(value: str) -> str:
 
 # ai-generated: build the minimal strict upstream client YAML schema.
 def render_config(connection: Connection, key_filename: str) -> str:
+    options = validate_options(connection.options)
     lines = [
         "mode: cnc",
         "auth:",
@@ -200,16 +275,16 @@ def render_config(connection: Connection, key_filename: str) -> str:
         f"  key_file: {quote('./' + key_filename)}",
         "net:",
         f"  transport: {connection.transport}",
-        '  dns: "8.8.8.8:53"',
+        f"  dns: {quote(options['dns'])}",
         "socks:",
-        '  host: "127.0.0.1"',
-        "  port: 8808",
+        f"  host: {quote(options['socks_host'])}",
+        f"  port: {options['socks_port']}",
         "liveness:",
-        "  interval: 10s",
-        "  timeout: 15s",
-        "  failures: 4",
+        f"  interval: {options['liveness_interval']}",
+        f"  timeout: {options['liveness_timeout']}",
+        f"  failures: {options['liveness_failures']}",
         "lifecycle:",
-        "  max_session_duration: 6h",
+        f"  max_session_duration: {options['max_session_duration']}",
     ]
     p = connection.parameters
     if connection.transport == "vp8channel" and p:
@@ -242,7 +317,13 @@ def render_config(connection: Connection, key_filename: str) -> str:
             value = p[uri_name]
             rendered = quote(value) if uri_name in {"video-codec", "video-qr-recovery"} else value
             lines.append(f"  {yaml_name}: {rendered}")
-    lines.append("debug: false")
+    if options["traffic_max_payload"] != "0" or options["traffic_min_delay"]:
+        lines.extend(("traffic:", f"  max_payload_size: {options['traffic_max_payload']}"))
+        if options["traffic_min_delay"]:
+            lines.append(f"  min_delay: {options['traffic_min_delay']}")
+        if options["traffic_max_delay"]:
+            lines.append(f"  max_delay: {options['traffic_max_delay']}")
+    lines.append(f"debug: {options['debug']}")
     return "\n".join(lines) + "\n"
 
 
@@ -283,11 +364,12 @@ def write_config(config_path: Path, connection: Connection) -> None:
 # ai-generated: return the complete non-secret managed profile representation.
 def profile_payload(connection: Connection) -> dict[str, object]:
     return {
-        "schema": 1,
+        "schema": 2,
         "provider": connection.provider,
         "transport": connection.transport,
         "room": connection.room,
         "parameters": dict(connection.parameters),
+        "options": dict(connection.options),
     }
 
 
@@ -311,11 +393,12 @@ def write_profile(profile_path: Path, connection: Connection) -> None:
 # ai-generated: validate a settings object supplied by the authenticated web UI.
 def connection_from_settings(payload: object, key: str) -> Connection:
     if not isinstance(payload, dict) or set(payload) != PROFILE_KEYS - {"schema"}:
-        raise ValueError("settings must contain provider, transport, room and parameters")
+        raise ValueError("settings must contain provider, transport, room, parameters and options")
     provider = payload.get("provider")
     transport = payload.get("transport")
     room = payload.get("room")
     parameters = payload.get("parameters")
+    options = payload.get("options")
     if not all(isinstance(item, str) for item in (provider, transport, room)):
         raise ValueError("provider, transport and room must be strings")
     if provider not in PROVIDERS or transport not in TRANSPORTS:
@@ -332,9 +415,10 @@ def connection_from_settings(payload: object, key: str) -> Connection:
     if unknown:
         raise ValueError(f"unsupported {transport} parameter: {sorted(unknown)[0]}")
     validate_parameters(transport, parameters)
+    validated_options = validate_options(options)
     if not HEX_KEY.fullmatch(key):
         raise ValueError("stored encryption key is invalid")
-    return Connection(provider, transport, room, key.lower(), dict(parameters))
+    return Connection(provider, transport, room, key.lower(), dict(parameters), validated_options)
 
 
 # ai-generated: read the single managed key without returning it to the web process.
@@ -351,8 +435,11 @@ def read_current_key(config_path: Path) -> str:
 # ai-generated: load and revalidate a persisted profile before displaying it.
 def load_profile(profile_path: Path) -> dict[str, object]:
     payload = json.loads(profile_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or set(payload) != PROFILE_KEYS or payload.get("schema") != 1:
+    if not isinstance(payload, dict) or set(payload) not in {frozenset(PROFILE_KEYS_V1), frozenset(PROFILE_KEYS)} or payload.get("schema") not in {1, 2}:
         raise ValueError("managed profile schema is invalid")
+    if payload.get("schema") == 1:
+        payload = dict(payload)
+        payload["options"] = dict(DEFAULT_OPTIONS)
     settings = {name: payload[name] for name in PROFILE_KEYS - {"schema"}}
     connection = connection_from_settings(settings, "0" * 64)
     return profile_payload(connection)

@@ -83,6 +83,26 @@ UX и функции прежнего Manager изучаются по `Oleglog/O
 
 Jitsi `room=any` запрещён. Для Jitsi требуется `https://host/room` или `host/room`. Несовместимая пара provider/transport блокируется до записи файла.
 
+### Единые поля соединения
+
+Обе панели используют одинаковые имена и пределы. Значения сервера и клиента должны совпадать для `provider`, `transport`, `room` и блока `traffic`.
+
+| Поле UI | Значение по умолчанию | Проверка |
+|---|---:|---|
+| DNS | `8.8.8.8:53` | `host:port`, порт 1–65535 |
+| SOCKS host клиента | `127.0.0.1` | только loopback в первой стабильной версии |
+| SOCKS port клиента | `8808` | 1–65535, не порт Web UI |
+| Liveness interval | `10s` | Go duration, 1s–24h |
+| Liveness timeout | `15s` | Go duration, 1s–24h |
+| Liveness failures | `4` | целое 1–100 |
+| Max session duration | `6h` | Go duration, 1m–168h |
+| Traffic max payload | `0` | целое 0–1048576 |
+| Traffic min delay | пусто | пусто или Go duration 0–60s |
+| Traffic max delay | пусто | пусто или Go duration 0–60s, не меньше min |
+| Debug | выключен | boolean |
+
+Transport-поля показываются динамически. `vp8channel`: FPS 1–240 и batch 1–1000000. `seichannel`: FPS, batch, fragment 1–60000 и ACK 1–3600000 мс. `videochannel`: width/height 16–8192, FPS 1–240, codec `qrcode` или `tile`; `tile` требует 1080×1080. Профиль Web UI не содержит ключ, а существующий ключ читается только отдельным root-процессом при атомарной пересборке YAML.
+
 ### Подключение клиента
 
 - canonical Spec URI скрыт по умолчанию;
@@ -186,10 +206,10 @@ UI не считает PID достаточным признаком готов�
 - [x] импорт canonical Spec URI и запрет Jitsi `any`;
 - [x] автоматические Python и shell тесты упаковки;
 - [x] единый дизайн и базовая навигация, адаптированные из Manager;
-- [ ] полный мастер VPS-инстанса и экспертные параметры;
-- [ ] удаление, клонирование, backup/restore и диагностический bundle в VPS UI;
+- [x] полный мастер VPS-инстанса и экспертные параметры ядра;
+- [x] удаление, клонирование, backup/restore и диагностический TXT в VPS UI;
 - [ ] управление доменом, TLS и подписками;
-- [ ] полная форма параметров Keenetic и backup/restore;
+- [x] полная форма параметров Keenetic и backup/restore;
 - [x] безопасный `fresh` для VPS и `purge-legacy` после cutover на обеих платформах;
 - [ ] тесты всех новых API, установщика и отказов;
 - [ ] реальный prerelease на Debian 12 VPS и Keenetic ARM64;
@@ -198,4 +218,3 @@ UI не считает PID достаточным признаком готов�
 ## Правило выпуска
 
 Предварительный release публикуется только после зелёных CI и тестов чистой установки в виртуальной Debian-среде. Стабильный release дополнительно требует реального Keenetic ARM64, перезагрузки обеих сторон, сквозного SOCKS5-теста, проверки обновления, rollback и отсутствия WAN-доступа к панели роутера.
-
