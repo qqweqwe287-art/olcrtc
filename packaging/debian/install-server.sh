@@ -482,7 +482,7 @@ install_admin_tls() {
 
 # ai-generated
 prepare_v011_migration() {
-    [ "$MIGRATE_V011" -eq 1 ] || return
+    [ "$MIGRATE_V011" -eq 1 ] || return 0
     legacy_lib=/usr/local/lib/olcrtc
     legacy_config=/etc/olcrtc/$INSTANCE.yaml
     legacy_unit=/etc/systemd/system/olcrtc-server@.service
